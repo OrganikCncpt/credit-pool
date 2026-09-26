@@ -58,10 +58,12 @@ contract CreditPoolTest is Test {
         pool.deposit{value: 0.0003 ether}(ids);
     }
 
-    function test_RevertStaleOracle() public {
-        feed.set(2500e8, block.timestamp - 2 days);
-        vm.expectRevert(CreditPool.StaleOracle.selector);
-        pool.depositFee();
+    function test_StaleOracleUsesFallbackFee() public {
+        uint256 live = pool.depositFee();
+        assertEq(pool.fallbackFeeWei(), live);              // frozen at deploy: $1 at the deploy price
+        feed.set(5000e8, block.timestamp - 2 days);         // stale, even though the price changed
+        assertTrue(pool.feeUsesFallback());
+        assertEq(pool.depositFee(), live);                  // fallback, not the stale price
     }
 
     function test_OverflowIntoNextBatch() public {

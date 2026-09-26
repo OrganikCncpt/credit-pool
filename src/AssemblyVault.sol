@@ -10,8 +10,9 @@ import {IStatementAssembler} from "./IStatementAssembler.sol";
 ///         Statements contract to hold approval over the Credits it burns. If the pool granted
 ///         that approval directly, the assembler could reach every Credit in the pool. Instead,
 ///         for each assembly the pool moves exactly one batch's 80 Credits here, and only this
-///         vault ever approves the assembler. The vault is empty before and after every call,
-///         so even a malicious assembler can reach nothing but the 80 Credits being assembled.
+///         vault ever approves the assembler. Nothing of any depositor's is in the vault before or
+///         after a call (only stray tokens someone donated, which belong to no batch), so even a
+///         malicious assembler can reach nothing of value but the 80 Credits being assembled.
 /// @dev    Created by CreditPool in its constructor; only the pool can call it.
 contract AssemblyVault is IERC721Receiver {
     IERC721 public immutable credits;
@@ -37,10 +38,14 @@ contract AssemblyVault is IERC721Receiver {
     }
 
     /// @notice Burns `ids` (already moved here by the pool) into one Statement and sends it to the pool.
+    /// @dev    All checks are deltas from the start of the call. Anyone can plain-transfer a Credit
+    ///         here (no callback), so an absolute "balance must be N" check would let one donated
+    ///         token block every future assembly (external audit #1, H-01). Stray tokens are
+    ///         simply ignored: they can never be part of a batch.
     function assemble(uint256[] calldata ids) external returns (uint256 sid) {
         if (msg.sender != pool) revert OnlyPool();
-        // The pool moved exactly these Credits in; the vault holds nothing else.
-        if (credits.balanceOf(address(this)) != ids.length) revert CreditsNotBurned();
+        uint256 heldCredits = credits.balanceOf(address(this)); // includes this batch, moved in by the pool
+        if (heldCredits < ids.length) revert CreditsNotBurned();
         uint256 heldStatements = statements.balanceOf(address(this));
 
         credits.setApprovalForAll(address(assembler), true);
@@ -54,8 +59,8 @@ contract AssemblyVault is IERC721Receiver {
             if (_gotId != sid) revert StatementNotReceived();
             _got = false;
         }
-        // Every Credit was burned, and nothing was pushed in to make the numbers work.
-        if (credits.balanceOf(address(this)) != 0) revert CreditsNotBurned();
+        // Exactly this batch left, nothing was pushed in to make the numbers work, and each id is burned.
+        if (credits.balanceOf(address(this)) != heldCredits - ids.length) revert CreditsNotBurned();
         for (uint256 i = 0; i < ids.length; ++i) {
             if (!_burned(ids[i])) revert CreditsNotBurned();
         }

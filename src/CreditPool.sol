@@ -44,6 +44,13 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     IStatementAssembler public immutable assembler;
     AggregatorV3Interface public immutable ethUsdFeed;
     uint256 public immutable assemblyOpensAt;
+    /// @dev Feed decimals, read once at deploy (external audit #1, L-02).
+    uint8 private immutable _feedDecimals;
+    /// @notice Per-Credit fee used whenever the price feed can't be trusted (stale, future-dated,
+    ///         non-positive, or not answering), so deposits never stop because of the feed
+    ///         (external audit #1, M-01). Frozen at deploy as $1 in ETH at that moment; nobody
+    ///         can change it.
+    uint256 public immutable fallbackFeeWei;
     /// @notice The only address ever approved to the assembler; holds one batch for one call.
     AssemblyVault public immutable vault;
 
@@ -120,6 +127,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     error ZeroAddress();
     error ReserveChanged();
     error RenounceDisabled();
+    error NotAContract();
 
     constructor(
         address credits_,
@@ -129,10 +137,18 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         uint256 assemblyOpensAt_,
         address feeRecipient_
     ) Ownable(msg.sender) {
+        // Dependencies must be contracts (external audit #1, L-04); Deploy.s.sol checks more.
+        if (credits_.code.length == 0 || statements_.code.length == 0 || assembler_.code.length == 0 || ethUsdFeed_.code.length == 0) {
+            revert NotAContract();
+        }
         credits = IERC721(credits_);
         statements = IERC721(statements_);
         assembler = IStatementAssembler(assembler_);
         ethUsdFeed = AggregatorV3Interface(ethUsdFeed_);
+        _feedDecimals = AggregatorV3Interface(ethUsdFeed_).decimals();
+        uint256 atDeploy = _liveFee();
+        if (atDeploy == 0) revert StaleOracle(); // the feed must be healthy at deploy to set the fallback
+        fallbackFeeWei = atDeploy;
         assemblyOpensAt = assemblyOpensAt_;
         if (feeRecipient_ == address(0)) revert ZeroAddress();
         feeRecipient = feeRecipient_;
@@ -144,11 +160,26 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     /// @notice Current fee per Credit ($1) in wei. A deposit of n Credits pays n × this.
     ///         Frontends should send a small buffer; excess is refunded.
     function depositFee() public view returns (uint256) {
-        (, int256 price,, uint256 updatedAt,) = ethUsdFeed.latestRoundData();
-        if (price <= 0 || block.timestamp - updatedAt > ORACLE_MAX_AGE) revert StaleOracle();
-        uint8 d = ethUsdFeed.decimals();
-        // fee = $1 / (ETH/USD)  →  wei
-        return (DEPOSIT_FEE_USD * 10 ** d * 1e18) / (uint256(price) * 1e8);
+        uint256 live = _liveFee();
+        return live == 0 ? fallbackFeeWei : live;
+    }
+
+    /// @notice True while the price feed can't be trusted and deposits use `fallbackFeeWei`.
+    function feeUsesFallback() external view returns (bool) {
+        return _liveFee() == 0;
+    }
+
+    /// @dev $1 in wei at the feed's current price, or 0 if the feed can't be trusted right now:
+    ///      it reverts, reports a non-positive price, is older than ORACLE_MAX_AGE, or is dated in
+    ///      the future (external audit #1, L-03). Never reverts.
+    function _liveFee() internal view returns (uint256) {
+        try ethUsdFeed.latestRoundData() returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
+            if (price <= 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > ORACLE_MAX_AGE) return 0;
+            // fee = $1 / (ETH/USD)  →  wei
+            return (DEPOSIT_FEE_USD * 10 ** _feedDecimals * 1e18) / (uint256(price) * 1e8);
+        } catch {
+            return 0;
+        }
     }
 
     // ───────────────────────── deposit / withdraw ─────────────────────────
@@ -261,6 +292,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         uint256 heldCredits = credits.balanceOf(address(this));
         uint256[] storage ids = batch.creditIds;
         for (uint256 i = 0; i < ids.length; ++i) {
+            delete _credit[ids[i]]; // about to be burned: drop stale depositor/batch (external audit #1, I-05)
             credits.transferFrom(address(this), address(vault), ids[i]);
         }
         uint256 sid = vault.assemble(ids);
@@ -336,6 +368,9 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     function _startAuction(uint256 b) internal {
         Batch storage batch = _batches[b];
         if (batch.state != BatchState.Assembled) revert WrongBatchState();
+        // A sole 80-slot holder decides alone: they can redeem, or auction it themselves, but no
+        // one else can push their Statement into a sale (external audit #1, H-02; extends CP-12).
+        if (batch.depositors.length == 1 && msg.sender != batch.depositors[0]) revert NotDepositor();
         uint256 reserve = auctionReserve(b);
         batch.state = BatchState.Auction;
         uint64 endsAt = uint64(block.timestamp + AUCTION_DURATION);

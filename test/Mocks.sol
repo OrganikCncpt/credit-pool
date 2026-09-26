@@ -56,9 +56,12 @@ contract MockFeed {
     int256 public price; uint256 public updatedAt;
     /// updatedAt == 0 means "always fresh" (local dev); tests set it explicitly.
     constructor(int256 p) { price = p; }
+    bool public broken; // simulates a feed that stops answering (reverts)
     function set(int256 p, uint256 t) external { price = p; updatedAt = t; }
+    function setBroken(bool b) external { broken = b; }
     function decimals() external pure returns (uint8) { return 8; }
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        require(!broken, "feed down");
         uint256 t = updatedAt == 0 ? block.timestamp : updatedAt;
         return (1, price, t, t, 1);
     }

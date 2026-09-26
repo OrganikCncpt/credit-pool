@@ -31,16 +31,18 @@ Revenue: $1 per Credit deposited plus 1% of each sale, swept (permissionless) to
 
 ## 2. Scope
 
-Commit: **`30d172a`**, tag **`audit-prep-1`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-1
+Current: tag **`audit-prep-2`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-2
+(fixes for external audit #1; see `docs/EXTERNAL-AUDIT-1-TRIAGE.md`).
+Previously audited: tag `audit-prep-1`, commit `30d172a`.
 (Later commits on `main` change CI and docs only; the in-scope contracts are unchanged.)
 
 | File | nSLOC | Notes |
 |---|---:|---|
-| `src/CreditPool.sol` | 380 | Batches, custody, voting, auction, payouts, fees |
-| `src/AssemblyVault.sol` | 58 | Custody firewall between the pool and the Statements contract |
+| `src/CreditPool.sol` | 401 | Batches, custody, voting, auction, payouts, fees |
+| `src/AssemblyVault.sol` | 59 | Custody firewall between the pool and the Statements contract |
 | `src/IStatementAssembler.sol` | 4 | **Placeholder** for the unpublished Statements interface |
-| `script/Deploy.s.sol` | 35 | Mainnet deploy with parameter guards |
-| **Total** | **477** | |
+| `script/Deploy.s.sol` | 36 | Mainnet deploy with parameter guards |
+| **Total** | **500** | |
 
 Compiler: solc **0.8.28** (pinned), optimizer on, 200 runs, default (non-IR) pipeline.
 Dependencies: OpenZeppelin Contracts **v5.7.0** (`ReentrancyGuard`, `Ownable2Step`, ERC-721 interfaces).
@@ -59,7 +61,7 @@ Dependencies: OpenZeppelin Contracts **v5.7.0** (`ReentrancyGuard`, `Ownable2Ste
 | Anyone | assemble a full batch; start / settle auctions; sweep fees to `feeRecipient` | No |
 | Owner | `setFeeRecipient` only (two-step ownership; `renounceOwnership` disabled) | Minimal: cannot touch Credits, Statements, bids or proceeds |
 | Statements contract (`assembler`, immutable) | burns the 80 Credits the vault holds during one `assemble` call | **Trusted to mint a Statement**, but custody does not depend on it (see invariant C3) |
-| Chainlink ETH/USD (immutable) | prices the $1 fee | Trusted for the fee only; a dead feed blocks deposits, nothing else |
+| Chainlink ETH/USD (immutable) | prices the $1 fee | Trusted for the fee only; if it is stale or down, deposits use `fallbackFeeWei` (frozen at deploy) instead of stopping |
 
 No upgradeability, no pause, no admin withdrawal. Every address above is immutable except `feeRecipient` and the owner.
 
@@ -94,6 +96,7 @@ The full, maintained list is `.claude/skills/creditpool-audit/references/creditp
   outbid), rounding dust, CDN frontend, deposit size vs the per-tx gas cap, stale ids on
   dissolved batches, plain `transferFrom` NFTs stuck, Statement delivered with `transferFrom`.
 - **Blocked on Statements OK-1..5:** see below.
+- **External audit #1** (on `audit-prep-1`): triage and fixes in `docs/EXTERNAL-AUDIT-1-TRIAGE.md` (CP-23..27).
 
 ## 6. Blocked on Statements (the most important thing to review once it exists)
 
@@ -113,7 +116,7 @@ contract is published, confirm:
 
 ```bash
 forge build
-forge test                                                        # 103 local tests
+forge test                                                        # 112 local tests
 MAINNET_RPC=<rpc> forge test --match-contract Fork                # real Credits on a mainnet fork
 forge coverage --no-match-contract Fork --no-match-path "test/custody/NftCustody.t.sol" --report summary
 ```

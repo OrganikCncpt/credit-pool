@@ -59,14 +59,15 @@ contract AttacksTest is Test {
         vm.prank(who); pool.deposit{value: fee}(ids);
     }
 
-    // ── FIXED 1: heartbeat edge no longer bricks deposits; a dead feed still does ──
+    // ── FIXED 1: heartbeat edge no longer bricks deposits; a dead feed doesn't either (ext. M-01) ──
     function test_Fixed_OracleHeartbeatEdge() public {
         feed.set(2500e8, block.timestamp - 3600 - 12); // one block past a 1h heartbeat
         uint256[] memory ids = _give(alice, 1);
         vm.prank(alice); pool.deposit{value: 1 ether}(ids);
+        assertFalse(pool.feeUsesFallback());
         feed.set(2500e8, block.timestamp - 1 days - 1);
-        vm.expectRevert(CreditPool.StaleOracle.selector);
-        pool.depositFee();
+        assertTrue(pool.feeUsesFallback());
+        assertEq(pool.depositFee(), pool.fallbackFeeWei());
     }
 
     // ── FIXED 2: stray safeTransfers bounce instead of getting stuck ──
@@ -196,7 +197,7 @@ contract AttacksTest is Test {
         pool.assemble(0);
         vm.warp(block.timestamp + 31 days);
         assertFalse(pool.noReserveOpen(0));
-        vm.prank(eve); vm.expectRevert(CreditPool.ReserveQuorumNotMet.selector);
+        vm.prank(eve); vm.expectRevert(CreditPool.NotDepositor.selector); // only the sole holder decides (ext. audit H-02)
         pool.startAuction(0);
         vm.prank(alice); pool.redeem(0);
     }
@@ -205,7 +206,7 @@ contract AttacksTest is Test {
     function test_Safe_RefundReentrancyBlocked() public {
         _deposit(alice, 80); pool.assemble(0);
         vm.prank(alice); pool.setReserve(0, 1 ether);
-        pool.startAuction(0);
+        vm.prank(alice); pool.startAuction(0); // sole holder starts their own auction
         NastyBidder n = new NastyBidder(pool);
         n.bid{value: 1 ether}(0);
         vm.prank(bob); pool.bid{value: 2 ether}(0);

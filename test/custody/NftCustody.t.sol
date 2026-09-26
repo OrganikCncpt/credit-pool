@@ -211,6 +211,12 @@ contract NftCustodyTest is Test {
     function _expectNotDepositor(address who, uint256[] memory ids) internal {
         vm.prank(who); vm.expectRevert(CreditPool.NotDepositor.selector); pool.withdraw(ids);
     }
+    /// After assembly the burned Credits are dropped from bookkeeping (external audit #1, I-05),
+    /// so even their former depositor gets NotDepositor: there is nothing left to withdraw.
+    function _expectUntracked(address who, uint256[] memory ids) internal {
+        vm.prank(who); vm.expectRevert(CreditPool.NotDepositor.selector); pool.withdraw(ids);
+    }
+
     function _expectWrongState(address who, uint256[] memory ids) internal {
         vm.prank(who); vm.expectRevert(CreditPool.WrongBatchState.selector); pool.withdraw(ids);
     }
@@ -285,21 +291,21 @@ contract NftCustodyTest is Test {
         pool.assemble(0); pool.assemble(1);
 
         // Assembled
-        _expectWrongState(alice, _one(a[0]));
+        _expectUntracked(alice, _one(a[0]));
         _expectNotDepositor(eve, _one(a[0]));
         // Auction
         vm.prank(alice); pool.setReserve(0, 1 ether);
         vm.prank(bob); pool.setReserve(0, 1 ether);
         pool.startAuction(0);
-        _expectWrongState(alice, _one(a[0]));
+        _expectUntracked(alice, _one(a[0]));
         vm.prank(bidder1); pool.bid{value: 1 ether}(0);
         vm.warp(vm.getBlockTimestamp() + 25 hours);
         pool.settle(0);
         // Settled
-        _expectWrongState(alice, _one(a[0]));
+        _expectUntracked(alice, _one(a[0]));
         // Redeemed
         vm.prank(whale); pool.redeem(1);
-        _expectWrongState(whale, _one(w[0]));
+        _expectUntracked(whale, _one(w[0]));
         _expectNotDepositor(eve, _one(w[0]));
         // burned credits stay burned
         vm.expectRevert(); credits.ownerOf(a[0]);
@@ -513,7 +519,7 @@ contract NftCustodyTest is Test {
         _deposit(alice, 80); pool.assemble(0);
         uint256 sid = _sid(pool, 0);
         vm.prank(alice); pool.setReserve(0, 1 ether);
-        pool.startAuction(0);
+        vm.prank(alice); pool.startAuction(0); // sole holder starts their own auction
         vm.warp(vm.getBlockTimestamp() + 25 hours);
         pool.settle(0);
         assertEq(stmts.ownerOf(sid), address(pool));
@@ -936,6 +942,8 @@ contract CustodyHandler is Test {
         if (!pool.noReserveOpen(bb)) {
             for (uint256 i; i < 4; ++i) if (pool.slots(bb, users[i]) > 0) { vm.prank(users[i]); pool.setReserve(bb, 1 ether); }
         }
+        address[] memory ds = pool.batchDepositors(bb);
+        if (ds.length == 1) vm.prank(ds[0]); // only a sole holder may auction their own batch
         pool.startAuction(bb);
     }
 

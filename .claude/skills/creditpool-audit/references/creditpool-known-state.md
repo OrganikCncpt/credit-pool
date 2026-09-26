@@ -95,6 +95,20 @@ Fixed after fused audit #2 (`docs/FUSED-AUDIT-2.md`, 2026-09-25):
 | CP-21 | 30-day fallback discarded even a unanimous reserve (N-5) | Fallback minimum = lowest vote cast (`lowestVote`), 0 only if nobody voted; `auctionReserve` view |
 | CP-22 | No upper bound on `ASSEMBLY_OPENS_AT`; single-step, renounceable ownership; floating pragma, unpinned solc/optimizer; Slither CEI and uninitialized-local notes (N-6, N-7, N-9) | Deploy script bounds [-30, +90] days and requires `OWNER`; `Ownable2Step`, `renounceOwnership` reverts; pragma `0.8.28`, `foundry.toml` pins solc and optimizer; `_deposit` records before transferring; explicit zero inits |
 
+Fixed after external audit #1 (`docs/EXTERNAL-AUDIT-1-TRIAGE.md`, tests in `test/ExternalAudit1.t.sol`):
+
+| ID | Was | Fix now in code |
+|---|---|---|
+| CP-23 | `AssemblyVault` absolute Credit-balance checks: one donated Credit blocked all assembly forever (ext. H-01) | Entry/exit are deltas from the balance at entry; per-id burn check kept; swap still caught with a stray present |
+| CP-24 | A sole holder's own vote let anyone force their Statement to auction (ext. H-02; CP-12 covered only the 30-day path) | Only the sole holder may start an auction on a single-depositor batch (`NotDepositor` otherwise); frontend hides the button for others |
+| CP-25 | Feed hygiene (ext. L-02, L-03) | Feed decimals read once at construction; future-dated round → `StaleOracle` |
+| CP-26 | Constructor accepted non-contract dependencies (ext. L-04) | `NotAContract` for credits, statements, assembler, feed |
+| CP-27 | Burned Credits still reported a depositor/batch (ext. I-05) | `_credit` cleared when moved to the vault; withdrawing a burned id now reverts `NotDepositor` |
+
+External audit #1 H-03 is accepted as AR-10 (owner decision).
+
+| CP-28 | A dead or stale price feed blocked all deposits (ext. M-01; was DI-1) | `fallbackFeeWei` frozen at deploy ($1 in ETH then) is used whenever the feed is untrusted; `depositFee()` never reverts; `feeUsesFallback()`; constructor requires a healthy feed |
+
 ## Accepted residuals (known, deliberate or out of our control)
 
 | ID | Residual | Why accepted |
@@ -108,6 +122,7 @@ Fixed after fused audit #2 (`docs/FUSED-AUDIT-2.md`, 2026-09-25):
 | AR-7 | Dissolved batches keep their `creditIds` array (`filled` still reads 80) | Contract withdrawals use `_credit`, which is cleared; the frontend also checks `batchOf` (CP-19) |
 | AR-8 | NFTs sent by plain `transferFrom` (not `safeTransferFrom`) are stuck | No admin rescue by design (immutable, ownerless custody) |
 | AR-9 | `settle` delivers the Statement with `transferFrom`, so a contract winner without ERC-721 support can't move it (audit #2 N-8) | Deliberate: `safeTransferFrom` would let a malicious winner revert and brick settlement for every depositor |
+| AR-10 | After 30 days unsold, the fallback minimum is the lowest vote cast, unweighted by slots, so one low vote sets the floor (ext. audit #1 H-03) | Owner decision: prevents a majority from blocking a sale forever (CP-4, CP-21). Everyone can outbid for 24h; the frontend warns depositors in the last 7 days before it applies |
 
 ## Open, known, blocked on the Statements contract
 

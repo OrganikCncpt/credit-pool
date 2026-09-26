@@ -686,6 +686,11 @@ contract EthHandler is Test {
                 }
             }
         }
+        address[] memory ds = pool.batchDepositors(b);
+        if (ds.length == 1) {                          // only a sole holder may auction their own batch
+            if (ds[0] == address(re)) return;          // (the re-entering actor can't be pranked into it)
+            vm.prank(ds[0]);
+        }
         pool.startAuction(b);
         assertEq(gLiveBid[b], 0);
         ++nStarted;

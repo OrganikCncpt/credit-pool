@@ -12,6 +12,7 @@ const POOL_ABI = parseAbi([
   "function openBatchId() view returns (uint256)",
   "function accruedFees() view returns (uint256)",
   "function depositFee() view returns (uint256)",
+  "function feeUsesFallback() view returns (bool)",
   "function batchInfo(uint256) view returns (uint8 state, uint256 filled, uint256 depositorCount, uint256 statementId, uint256 proceeds, uint64 fullAt)",
   "function batchCredits(uint256) view returns (uint256[])",
   "function batchDepositors(uint256) view returns (address[])",
@@ -170,7 +171,7 @@ const toWei = (v) => {
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 // ≈ USD for an ETH amount. depositFee() is exactly $1 in wei (Chainlink ETH/USD), so $ = wei ÷ fee.
 const usd = (wei) => {
-  if (!S.fee || wei == null) return "";
+  if (!S.fee || S.feeFallback || wei == null) return ""; // the fallback fee isn't exactly $1
   const d = Number(wei) / Number(S.fee);
   return ` (≈ $${d >= 100 ? Math.round(d).toLocaleString("en-US") : d.toFixed(2)})`;
 };
@@ -425,6 +426,8 @@ async function renderStats() {
   const [open, fees, fee, opensAt] = await Promise.all([
     read("openBatchId"), read("accruedFees"), tryRead("depositFee"), read("assemblyOpensAt"),
   ]);
+  const fallback = await tryRead("feeUsesFallback");
+  S.feeFallback = !!fallback;
   const [, filled] = await read("batchInfo", [open]);
   S.openBatch = open; S.openFilled = filled;
   const stat = (v, k) => el("div", { class: "stat" }, el("b", {}, v), el("span", {}, k));
@@ -432,7 +435,7 @@ async function renderStats() {
     stat(`${filled} / 80`, `Credits in the open batch (#${open})`),
     stat(String(open), "batches filled so far"),
     el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
-    stat(fee == null ? "oracle stale" : eth(fee, 5), "fee per Credit ($1)"),
+    stat(fee == null ? "unavailable" : eth(fee, 5), fallback ? "fee per Credit (fixed fallback: price feed offline)" : "fee per Credit ($1)"),
     stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
@@ -796,7 +799,12 @@ async function batchCard(b, mineOnly = false) {
         send("Vote", "setReserve", [b, v]);
       }, "ghost", "vote")));
     }
-    if (!(me && slots)) actions.append(el("span", { class: "muted small" },
+    // A batch with a single depositor belongs to them alone: only they can redeem or auction it.
+    const sole = depositors === 1n;
+    const soleMine = sole && slots === PER;
+    if (sole && !soleMine) actions.append(el("span", { class: "muted small" },
+      "One depositor holds all 80 slots, so only they can redeem this Statement or put it up for auction."));
+    else if (!(me && slots)) actions.append(el("span", { class: "muted small" },
       "Only this batch's depositors vote on the minimum price. Anyone can start the auction once more than 40 slots have voted, and anyone can bid."));
     // Both buttons use startAuctionAt: the CONTRACT refuses if the minimum changed after the
     // user confirmed it (votes moved, or the 30-day fallback kicked in).
@@ -805,7 +813,8 @@ async function batchCard(b, mineOnly = false) {
       const ok = await send(`Start auction #${b}`, "startAuctionAt", [b, reserve]);
       if (!ok) refresh();
     };
-    if (noReserve && reserve != null) actions.append(btn(reserve ? `Start auction @ ${eth(reserve)}` : "Start no-reserve auction", start([
+    if (sole && !soleMine) { /* no start button for anyone but the sole holder */ }
+    else if (noReserve && reserve != null) actions.append(btn(reserve ? `Start auction @ ${eth(reserve)}` : "Start no-reserve auction", start([
       reserve
         ? `It went 30 days without selling, so the minimum is now the lowest price any depositor voted: ${eth(reserve)}.`
         : "It went 30 days without selling and nobody voted, so there's no minimum: the highest bid wins.",
@@ -898,7 +907,7 @@ async function batchCard(b, mineOnly = false) {
   const tagText = state === "Full" && escape ? "Full · escape open" : state;
   const card = el("div", { class: "batch" },
     el("div", { class: "batch-top" }, el("b", {}, `Batch #${b}`), el("span", { class: `tag ${state}` }, tagText)),
-    nextStep({ state, filled, escape, noReserve, tally, reserve, slots, me, pref, highBid, endsAt, claimed, proceeds, assembledAt }),
+    nextStep({ state, filled, escape, noReserve, tally, reserve, slots, me, pref, highBid, endsAt, claimed, proceeds, assembledAt, sole: depositors === 1n }),
     el("div", { class: "bar", title: `${filled}/80` }, el("i", { style: `width:${(Number(filled) / 80) * 100}%` })),
     el("span", { class: "muted small" }, `${filled}/80 Credits`),
     mosaic,
@@ -1105,7 +1114,18 @@ function nextStep(x) {
         ? "Full, but not assembled for 14 days: depositors can now take their Credits back, or anyone can still assemble it."
         : "Full. Anyone can press Assemble to burn these 80 Credits into a Statement.");
     case "Assembled": {
+      if (x.sole) return t(x.slots === PER
+        ? "You hold all 80 slots: redeem the Statement to your wallet (no fee), or set a minimum price and auction it."
+        : "One depositor holds all 80 slots; only they can redeem or auction it.");
       if (x.noReserve) return t("Unsold for 30 days, so the minimum is now the lowest vote. Anyone can start the auction.");
+      // Heads-up before the 30-day fallback (accepted residual AR-10): after it, the minimum is the
+      // lowest single vote, so depositors who value the Statement more should be ready to bid.
+      const left = x.assembledAt + NO_RESERVE_AFTER - now();
+      if (left > 0n && left < 7n * 86400n) {
+        return el("p", { class: "next warn" }, "Unsold for nearly 30 days. In ",
+          el("span", { "data-ends": String(x.assembledAt + NO_RESERVE_AFTER) }, dur(left)),
+          ", the minimum drops to the lowest price any depositor voted, and anyone can start the auction. Vote, and be ready to bid if you value it more.");
+      }
       const started = x.tally * 2n > PER;
       if (!started) {
         const need = PER / 2n + 1n - x.tally;

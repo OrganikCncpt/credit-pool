@@ -49,5 +49,6 @@ contract Deploy is Script {
         console.log("owner:", pool.owner());
         console.log("pending owner (must acceptOwnership):", pool.pendingOwner());
         console.log("assembly vault:", address(pool.vault()));
+        console.log("fallback fee per Credit (wei, frozen at deploy):", pool.fallbackFeeWei());
     }
 }
