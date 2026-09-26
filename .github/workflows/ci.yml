@@ -1,0 +1,31 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Build
+        run: forge build --sizes
+      - name: Test
+        run: forge test -vv
+      - name: Fork test (real Credits)
+        if: ${{ secrets.MAINNET_RPC != '' }}
+        env:
+          MAINNET_RPC: ${{ secrets.MAINNET_RPC }}
+        run: forge test --match-contract Fork -vv
+  slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: crytic/slither-action@v0.4.0
+        with:
+          target: .
+          slither-args: --filter-paths "lib/|test/|external/" --exclude-dependencies
+          fail-on: none

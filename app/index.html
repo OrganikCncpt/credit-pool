@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>credit.pool</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="plates"><i class="c"></i><i class="m"></i><i class="y"></i><i class="k"></i></span>
+    credit.pool
+  </div>
+  <div class="wallet">
+    <span id="chain" class="muted"></span>
+    <button id="connect">Connect wallet</button>
+  </div>
+</header>
+
+<main>
+  <div id="demo" class="demo" hidden></div>
+
+  <section class="intro">
+    <h1>80 Credits → 1 Statement</h1>
+    <p>Pool your Credits with other holders. Every 80 burn into one Statement, which is sold at auction and the sale is split by how many Credits each person put in.</p>
+    <ol class="steps">
+      <li><b>Deposit</b><span>Add any number of Credits to the open batch. Withdraw any time until it fills.</span></li>
+      <li><b>Assemble</b><span>At 80, the batch locks and burns into one Statement, held for its depositors.</span></li>
+      <li><b>Vote &amp; auction</b><span>Depositors vote a minimum price, then a 24h auction open to anyone.</span></li>
+      <li><b>Collect</b><span>Your share = your Credits ÷ 80 of the sale. Fees: $1 per Credit deposited, 1% of the sale.</span></li>
+    </ol>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <div id="notice" class="notice" hidden></div>
+
+  <section id="mine" hidden>
+    <div class="section-head">
+      <h2>Your Credits <span id="mine-count" class="muted"></span></h2>
+      <div class="row">
+        <button id="select-all" class="ghost" data-tip="selectAll">Select all</button>
+        <button id="approve" class="ghost" data-tip="approve" hidden>Approve pool</button>
+        <!-- wrapper carries the tip: disabled buttons don't get hover events -->
+        <span id="deposit-wrap" class="tipwrap" data-tip="deposit"><button id="deposit" disabled>Deposit</button></span>
+      </div>
+    </div>
+    <p class="muted small" id="deposit-hint"></p>
+    <div id="credits" class="grid"></div>
+  </section>
+
+  <section id="claims" class="claims" hidden>
+    <div class="section-head">
+      <h2>Ready to collect <span id="claims-total"></span></h2>
+      <button id="collect-all" data-tip="collect">Collect all</button>
+    </div>
+    <dl id="claims-list" class="kv"></dl>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Your batches</h2>
+    </div>
+    <div id="my-batches" class="batches"><p class="muted">Connect a wallet to see your batches.</p></div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>All batches</h2>
+      <form id="jump" class="row">
+        <input id="jump-id" type="number" min="0" placeholder="Batch #">
+        <button class="ghost">Go</button>
+      </form>
+    </div>
+    <div id="filters" class="filters" role="tablist" aria-label="Filter batches"></div>
+    <div id="all-batches" class="batches"></div>
+    <div class="row center"><button id="more" class="ghost" hidden>Older batches</button></div>
+  </section>
+
+  <footer class="muted small">
+    <span id="pool-addr"></span> · fees <span id="fees"></span> <button id="sweep" class="link" data-tip="sweep">sweep</button>
+  </footer>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <form method="dialog" class="confirm">
+    <h2 id="confirm-title"></h2>
+    <ul id="confirm-body"></ul>
+    <div class="row confirm-actions">
+      <button value="cancel" class="ghost">Cancel</button>
+      <button value="ok" id="confirm-ok">Confirm</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="viewer" aria-labelledby="viewer-title">
+  <div class="viewer-head">
+    <h2 id="viewer-title"></h2>
+    <form method="dialog"><button class="ghost" aria-label="Close">Close</button></form>
+  </div>
+  <div id="viewer-body"></div>
+</dialog>
+<script type="module" src="app.js"></script>
+</body>
+</html>

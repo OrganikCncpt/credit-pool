@@ -1,0 +1,19 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+# Pinned for reproducible builds (the audited bytecode must match what gets deployed).
+solc = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+# Jack's Credits source (external/credits/, imported by test/custody/NftCustody.t.sol) only
+# compiles with via-IR. Scope that to those files so CreditPool itself keeps the default pipeline.
+additional_compiler_profiles = [{ name = "via-ir", via_ir = true, optimizer = true, optimizer_runs = 200 }]
+compilation_restrictions = [{ paths = "external/credits/**", via_ir = true }]
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[invariant]
+runs = 64
+depth = 40
+fail_on_revert = true
