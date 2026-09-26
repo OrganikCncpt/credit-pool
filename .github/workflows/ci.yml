@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # secrets can't be used in step `if:` conditions; expose it as env and test that instead
+      MAINNET_RPC: ${{ secrets.MAINNET_RPC }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -13,9 +16,7 @@ jobs:
       - name: Test
         run: forge test -vv
       - name: Fork test (real Credits)
-        if: ${{ secrets.MAINNET_RPC != '' }}
-        env:
-          MAINNET_RPC: ${{ secrets.MAINNET_RPC }}
+        if: ${{ env.MAINNET_RPC != '' }}
         run: forge test --match-contract Fork -vv
   slither:
     runs-on: ubuntu-latest

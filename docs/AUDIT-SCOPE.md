@@ -31,7 +31,8 @@ Revenue: $1 per Credit deposited plus 1% of each sale, swept (permissionless) to
 
 ## 2. Scope
 
-Commit: **TBD** (the repo has no commits yet; freeze and tag before sending).
+Commit: **`30d172a`**, tag **`audit-prep-1`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-1
+(Later commits on `main` change CI and docs only; the in-scope contracts are unchanged.)
 
 | File | nSLOC | Notes |
 |---|---:|---|
