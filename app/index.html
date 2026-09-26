@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>credit.pool</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2300a3e0'/%3E%3Crect x='9' width='7' height='7' fill='%23e0007a'/%3E%3Crect y='9' width='7' height='7' fill='%23f5d000'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%23111'/%3E%3C/svg%3E">
 </head>
 <body>
 <header>
@@ -20,6 +21,14 @@
 
 <main>
   <div id="demo" class="demo" hidden></div>
+
+  <section id="claims" class="claims" hidden aria-live="polite">
+    <div class="section-head">
+      <h2>Ready to collect <span id="claims-total"></span></h2>
+      <button id="collect-all" data-tip="collect">Collect all</button>
+    </div>
+    <dl id="claims-list" class="kv"></dl>
+  </section>
 
   <section class="intro">
     <h1>80 Credits → 1 Statement</h1>
@@ -49,19 +58,20 @@
     <div id="credits" class="grid"></div>
   </section>
 
-  <section id="claims" class="claims" hidden>
-    <div class="section-head">
-      <h2>Ready to collect <span id="claims-total"></span></h2>
-      <button id="collect-all" data-tip="collect">Collect all</button>
-    </div>
-    <dl id="claims-list" class="kv"></dl>
-  </section>
 
   <section>
     <div class="section-head">
       <h2>Your batches</h2>
     </div>
     <div id="my-batches" class="batches"><p class="muted">Connect a wallet to see your batches.</p></div>
+  </section>
+
+  <section id="gallery-section" hidden>
+    <div class="section-head">
+      <h2>Statements <span id="gallery-count" class="muted"></span></h2>
+    </div>
+    <p class="muted small">Every Statement the pool has assembled. Each one was burned from 80 Credits; click one to see them.</p>
+    <div id="gallery" class="gallery"></div>
   </section>
 
   <section>
@@ -77,8 +87,40 @@
     <div class="row center"><button id="more" class="ghost" hidden>Older batches</button></div>
   </section>
 
+  <section id="faq" class="faq">
+    <h2>Questions</h2>
+    <details><summary>What is a Statement?</summary>
+      <p>Jack Butcher's Credits burn 80 at a time into one Statement. Each X account could mint at most 50 Credits, so most people can't reach 80 alone. Credit Pool lets holders combine them.</p></details>
+    <details><summary>What does it cost?</summary>
+      <p>$1 per Credit you deposit, paid in ETH at the current price, plus 1% of each auction sale. Redeeming a whole Statement (holding all 80) has no sale fee. Nothing else: no cut of your Credits, no other fees.</p></details>
+    <details><summary>Can I get my Credits back?</summary>
+      <p>Yes, any time while the batch is still filling: open it under Your batches and press Withdraw. Once a batch reaches 80 it locks. If a full batch isn't assembled within 14 days, depositors can take their Credits back. The $1 fee isn't refunded.</p></details>
+    <details><summary>How is the price decided?</summary>
+      <p>Each depositor votes the lowest price they'd accept. The minimum is the lowest price that more than 40 of the batch's 80 slots accept, so a small group can't sell it cheap. Then anyone can bid for 24 hours; each bid must beat the last by 5%, and a bid in the last 15 minutes adds 15 minutes.</p></details>
+    <details><summary>What if nobody bids, or the price is set too high?</summary>
+      <p>With no bids, the batch goes back to voting and depositors can lower the price. If it's still unsold 30 days after assembly, the minimum drops to the lowest price any depositor voted, so a majority can't block a sale forever.</p></details>
+    <details><summary>When and how do I get paid?</summary>
+      <p>When an auction ends, anyone presses Settle. Your share (your Credits ÷ 80 of the sale, after the 1% fee) appears under Ready to collect at the top of the page. Press Collect all to send it to your wallet.</p></details>
+    <details><summary>Can I bid on a batch I'm in?</summary>
+      <p>Yes. If you win, your share of the sale comes back to you, so the Statement costs you less than your bid. The bid box shows the real cost.</p></details>
+    <details><summary>What does "Approve pool" allow?</summary>
+      <p>It lets the pool move Credits you choose to deposit, and nothing else: the contract can only take Credits from the wallet that is depositing, in that transaction. You can revoke it any time (see Safety below).</p></details>
+  </section>
+
+  <section id="safety" class="faq">
+    <h2>Safety</h2>
+    <ul class="safety">
+      <li>Your Credits and the Statements are held by the pool contract, not by a person. No one, including the team, can move them except by the rules above.</li>
+      <li>Bids are held by the contract. If you're outbid, your ETH waits for you under Ready to collect.</li>
+      <li>During assembly, Jack's Statements contract can only reach the 80 Credits being assembled, never anything else in the pool.</li>
+      <li>Open source, tested, and reviewed: <a id="repo-link" href="https://github.com/OrganikCncpt/credit-pool" target="_blank" rel="noopener">source and audit reports</a>.</li>
+      <li>Contracts: <span id="addr-list" class="mono"></span></li>
+      <li>To remove the pool's approval: <a id="revoke-link" href="https://revoke.cash" target="_blank" rel="noopener">revoke.cash</a>.</li>
+    </ul>
+  </section>
+
   <footer class="muted small">
-    <span id="pool-addr"></span> · fees <span id="fees"></span> <button id="sweep" class="link" data-tip="sweep">sweep</button>
+    <span id="pool-addr"></span> · fees collected <span id="fees"></span> <button id="sweep" class="link" data-tip="sweep">send to fee wallet</button>
   </footer>
 </main>
 

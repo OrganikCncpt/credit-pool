@@ -1,12 +1,13 @@
 import {
   createPublicClient, createWalletClient, custom, http, parseAbi, formatEther, parseEther, defineChain,
-} from "https://cdn.jsdelivr.net/npm/viem@2.56.8/+esm";
+} from "./vendor/viem.js"; // viem 2.56.8, bundled locally: no third-party code at runtime
 import { DEPLOYMENTS, DEFAULT_CHAIN } from "./config.js";
 
 // ───────────────────────── ABIs ─────────────────────────
 const POOL_ABI = parseAbi([
   "function assemblyOpensAt() view returns (uint256)",
   "function statements() view returns (address)",
+  "function vault() view returns (address)",
   "function credits() view returns (address)",
   "function openBatchId() view returns (uint256)",
   "function accruedFees() view returns (uint256)",
@@ -62,7 +63,10 @@ const ART_ABI = parseAbi([
   "function svg(bytes21 seed, uint64 paidAt) view returns (string)",
   "function describe(bytes21 seed, uint64 paidAt) view returns ((bytes32 hash, uint256 marks, uint256 capacity, uint256 plates, string colors, uint256 eights, string tier, string weight, string register, string eightsLabel))",
 ]);
-const STATEMENTS_ABI = parseAbi(["function tokenURI(uint256) view returns (string)"]);
+const STATEMENTS_ABI = parseAbi([
+  "function tokenURI(uint256) view returns (string)",
+  "function ownerOf(uint256) view returns (address)",
+]);
 
 const STATES = ["Filling", "Full", "Assembled", "Auction", "Settled", "Redeemed", "Dissolved"];
 const PER = 80n;
@@ -138,7 +142,7 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") hideTip(); });
 const S = {
   chainId: DEFAULT_CHAIN, dep: null, chain: null, pub: null, wallet: null, account: null,
   pool: null, credits: null, selected: new Set(), cursor: null, clockSkew: 0, approved: false, openBatch: 0n, openFilled: 0n,
-  openWho: new Set(), lastBlock: null, refreshing: false,
+  openWho: new Set(), lastBlock: null, refreshing: false, cards: new Map(), mineSig: null, tiles: new Map(),
 };
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, ...kids) => {
@@ -164,14 +168,34 @@ const toWei = (v) => {
   try { return parseEther(v); } catch { return null; }
 };
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+// ≈ USD for an ETH amount. depositFee() is exactly $1 in wei (Chainlink ETH/USD), so $ = wei ÷ fee.
+const usd = (wei) => {
+  if (!S.fee || wei == null) return "";
+  const d = Number(wei) / Number(S.fee);
+  return ` (≈ $${d >= 100 ? Math.round(d).toLocaleString("en-US") : d.toFixed(2)})`;
+};
+const ethUsd = (wei, dp) => eth(wei, dp) + usd(wei);
 const now = () => BigInt(Math.floor(Date.now() / 1000) + S.clockSkew);
 const dur = (s) => {
   s = Number(s); if (s <= 0) return "ended";
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m ${x}s`;
 };
-const read = (functionName, args = [], address = S.pool, abi = POOL_ABI) =>
+const readFresh = (functionName, args = [], address = S.pool, abi = POOL_ABI) =>
   S.pub.readContract({ address, abi, functionName, args });
+// Rendering reads go through a cache that is cleared at the start of every refresh, so the
+// batch cards, "Your batches" and the gallery never fetch the same value twice. Action
+// handlers use readFresh so they never act on a value from a previous render.
+const readCache = new Map();
+const read = (functionName, args = [], address = S.pool, abi = POOL_ABI) => {
+  const key = `${address}:${functionName}:${args.map(String).join(",")}`;
+  if (!readCache.has(key)) {
+    const p = readFresh(functionName, args, address, abi);
+    readCache.set(key, p);
+    p.catch(() => readCache.delete(key)); // don't cache failures
+  }
+  return readCache.get(key);
+};
 const tryRead = (...a) => read(...a).catch(() => null);
 
 function toast(msg, err = false, ms = 4000) {
@@ -182,10 +206,13 @@ function toast(msg, err = false, ms = 4000) {
 }
 
 // ───────────────────────── setup ─────────────────────────
-function chainFor(id, dep) {
+// Canonical Multicall3, same address on mainnet and every major chain (and on a mainnet fork).
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+function chainFor(id, dep, withMulticall) {
   return defineChain({
     id, name: dep.name, nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     rpcUrls: { default: { http: [dep.rpc] } },
+    ...(withMulticall ? { contracts: { multicall3: { address: MULTICALL3 } } } : {}),
   });
 }
 
@@ -212,7 +239,12 @@ async function init() {
   S.dep = DEPLOYMENTS[S.chainId];
   if (!S.dep) return notice(`Unsupported network (chain ${S.chainId}). Switch to ${Object.values(DEPLOYMENTS).map((d) => d.name).join(" or ")}.`);
   S.chain = chainFor(S.chainId, S.dep);
-  S.pub = createPublicClient({ chain: S.chain, transport: http(S.dep.rpc) });
+  // Many small reads → a few requests: JSON-RPC batching always, plus Multicall3 if it exists here.
+  const transport = http(S.dep.rpc, { batch: { batchSize: 100, wait: 10 } });
+  const probe = createPublicClient({ chain: S.chain, transport });
+  const hasMulticall = !!(await probe.getCode({ address: MULTICALL3 }).catch(() => null));
+  S.chain = chainFor(S.chainId, S.dep, hasMulticall);
+  S.pub = createPublicClient({ chain: S.chain, transport, batch: hasMulticall ? { multicall: { wait: 10 } } : undefined });
   $("chain").textContent = S.dep.name;
   if (!S.dep.pool) return notice(`credit.pool isn't deployed on ${S.dep.name} yet. It goes live once the Statements contract is published.`);
   S.pool = S.dep.pool;
@@ -230,7 +262,7 @@ async function init() {
     S.account = view;
     S.viewOnly = true;
   } else if (dev != null && S.chainId === 31337) {
-    const { privateKeyToAccount } = await import("https://cdn.jsdelivr.net/npm/viem@2.56.8/accounts/+esm");
+    const { privateKeyToAccount } = await import("./vendor/viem-accounts.js");
     const acct = privateKeyToAccount(ANVIL_KEYS[Number(dev) || 0]);
     S.account = acct.address;
     S.wallet = createWalletClient({ account: acct, chain: S.chain, transport: http(S.dep.rpc) });
@@ -248,6 +280,14 @@ async function init() {
   S.clockSkew = Number(blk.timestamp) - Math.floor(Date.now() / 1000);
 
   $("pool-addr").textContent = `pool ${short(S.pool)}`;
+  // Safety section: every contract the site talks to, linked to the explorer when there is one.
+  const addr = (label, a) => a && el("span", {}, `${label} `, S.dep.explorer
+    ? el("a", { href: `${S.dep.explorer}/address/${a}`, target: "_blank", rel: "noopener" }, short(a)) : short(a));
+  $("addr-list").replaceChildren(...[
+    addr("pool", S.pool), " · ", addr("assembly vault", await tryRead("vault")), " · ",
+    addr("Credits", S.credits), " · ", addr("Statements", S.statements),
+  ].filter(Boolean));
+  if (S.account && !S.viewOnly) $("revoke-link").href = `https://revoke.cash/address/${S.account}`;
   if (S.chainId === 31337) {
     const who = S.demoAs ? `You're acting as ${short(S.account)}.` : S.viewOnly ? `Viewing ${short(S.account)} read-only.` : "";
     $("demo").textContent = `Local demo on a copy of Ethereum mainnet: test ETH only, nothing here touches real Credits or real money. ${who}`;
@@ -292,6 +332,34 @@ function confirmStep(title, lines, okLabel = "Confirm") {
   return new Promise((ok) => dlg.addEventListener("close", () => ok(dlg.returnValue === "ok"), { once: true }));
 }
 
+// Contract errors → what a person should know and do. Anything unknown falls back to viem's summary.
+const ERROR_TEXT = {
+  WrongBatchState: "That batch has already moved to a different step. The page is refreshing.",
+  NotDepositor: "Only this batch's depositors can do that.",
+  InsufficientFee: "The fee (priced in ETH) went up a moment ago. Please try again.",
+  StaleOracle: "The ETH price feed hasn't updated recently, so fees can't be priced. Try again shortly.",
+  ReserveQuorumNotMet: "Not enough depositors have voted yet: more than 40 of 80 slots must vote.",
+  BidTooLow: "Someone else bid first, or your bid is below the minimum. Check the new minimum and bid again.",
+  AuctionLive: "The auction is still running.",
+  NothingToClaim: "There's nothing to collect for this wallet.",
+  TransferFailed: "Your wallet couldn't receive the ETH.",
+  BatchMoved: "Someone deposited just before you, so the batch changed. Review the new numbers and try again.",
+  ReserveChanged: "The minimum price changed since you looked. Review it and try again.",
+  StatementNotReceived: "The Statement wasn't minted as expected, so nothing was burned.",
+  CreditsNotBurned: "The Credits weren't burned as expected, so nothing changed.",
+  ZeroAddress: "That address isn't allowed.",
+};
+function friendlyError(e) {
+  if (e?.name === "UserRejectedRequestError" || e?.code === 4001 || /rejected|denied/i.test(e?.shortMessage ?? "")) {
+    return "You cancelled it in your wallet. Nothing was sent.";
+  }
+  let name = null;
+  e?.walk?.((x) => { if (x?.data?.errorName) { name = x.data.errorName; return true; } return false; });
+  if (name && ERROR_TEXT[name]) { if (name === "WrongBatchState") refresh(); return ERROR_TEXT[name]; }
+  if (/insufficient funds/i.test(e?.message ?? "")) return "Your wallet doesn't have enough ETH for this plus gas.";
+  return e?.shortMessage || e?.message || "Unknown error.";
+}
+
 // ───────────────────────── tx helper ─────────────────────────
 async function send(label, functionName, args = [], value, address = S.pool, abi = POOL_ABI) {
   if (!S.wallet) return toast(S.viewOnly ? "View-only: connect this wallet to act" : "Connect a wallet first", true);
@@ -310,7 +378,7 @@ async function send(label, functionName, args = [], value, address = S.pool, abi
     await refresh();
     return true;
   } catch (e) {
-    toast(`${label} failed: ${e.shortMessage || e.message}`, true, 8000);
+    toast(`${label} didn't go through. ${friendlyError(e)}`, true, 9000);
     return false;
   } finally {
     S.sending = false;
@@ -322,20 +390,29 @@ async function send(label, functionName, args = [], value, address = S.pool, abi
 async function refresh() {
   if (S.refreshing) return;
   S.refreshing = true;
+  readCache.clear();
   try {
     await Promise.all([renderStats(), renderMine(), renderMyBatches()]);
     await renderAllPage(true);
+    await renderGallery();
     hideTip();
+    S.lastRefresh = Date.now();
   } finally {
     S.refreshing = false;
   }
 }
 
-// Live updates: re-render when a new block lands, unless the user is mid-typing.
+// Live updates. Redraw when the POOL emits an event (a deposit, vote, bid...), not on every
+// block: mainnet makes a block every 12s, and redrawing on each one made the page flash.
+// A slow periodic refresh catches time-based changes (an auction ending, the 30-day fallback).
+const SAFETY_REFRESH_MS = 60_000;
 async function poll() {
   try {
     const bn = await S.pub.getBlockNumber();
-    if (S.lastBlock !== null && bn !== S.lastBlock && !document.activeElement?.matches("input")) {
+    if (S.lastBlock === null || bn === S.lastBlock) return;
+    const logs = await S.pub.getLogs({ address: S.pool, fromBlock: S.lastBlock + 1n, toBlock: bn }).catch(() => [1]);
+    const stale = Date.now() - (S.lastRefresh ?? 0) > SAFETY_REFRESH_MS;
+    if ((logs.length || stale) && !document.activeElement?.matches("input")) {
       const blk = await S.pub.getBlock();
       S.clockSkew = Number(blk.timestamp) - Math.floor(Date.now() / 1000);
       await refresh();
@@ -352,10 +429,11 @@ async function renderStats() {
   S.openBatch = open; S.openFilled = filled;
   const stat = (v, k) => el("div", { class: "stat" }, el("b", {}, v), el("span", {}, k));
   $("stats").replaceChildren(
-    stat(`#${open}`, `open batch · ${filled}/80`),
-    stat(String(open), "batches filled"),
+    stat(`${filled} / 80`, `Credits in the open batch (#${open})`),
+    stat(String(open), "batches filled so far"),
+    el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
     stat(fee == null ? "oracle stale" : eth(fee, 5), "fee per Credit ($1)"),
-    stat(opensAt <= now() ? "open" : dur(opensAt - now()), "Statement assembly"),
+    stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
   S.fee = fee;
@@ -374,8 +452,13 @@ async function renderMine() {
   $("approve").hidden = approved || !ids.length;
 
   const grid = $("credits");
+  const mineSig = ids.join(",");
+  if (mineSig === S.mineSig && grid.childElementCount) { updateDepositHint(); return; }
+  S.mineSig = mineSig;
   grid.replaceChildren(...ids.map((id) => {
+    const art = artCache.get(id);
     const tile = el("div", { class: "credit" + (S.selected.has(id) ? " sel" : ""), title: `Credit #${id}` },
+      art?.img ? el("img", { src: art.img, alt: `Credit #${id}` }) : null,
       el("span", { class: "id" }, `#${id}`));
     tile.onclick = () => {
       S.selected.has(id) ? S.selected.delete(id) : S.selected.add(id);
@@ -392,11 +475,42 @@ async function renderMine() {
 
 // Credits render fully on-chain; fetch a few at a time so public RPCs don't throttle.
 const artCache = new Map();
+
+// Tiny IndexedDB store for Credit artwork. Art is fixed on-chain (seed + payment time), so it
+// can be kept forever. Every call is best-effort: private windows or blocked storage just
+// fall back to fetching from the chain.
+const artDb = (() => {
+  let dbp = null;
+  const open = () => (dbp ??= new Promise((ok) => {
+    try {
+      const req = indexedDB.open("creditpool-art", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("art");
+      req.onsuccess = () => ok(req.result);
+      req.onerror = () => ok(null);
+    } catch { ok(null); }
+  }));
+  const tx = async (mode, fn) => {
+    const db = await open();
+    if (!db) return null;
+    return new Promise((ok) => {
+      try {
+        const r = fn(db.transaction("art", mode).objectStore("art"));
+        r.onsuccess = () => ok(r.result ?? null);
+        r.onerror = () => ok(null);
+      } catch { ok(null); }
+    });
+  };
+  return { get: (k) => tx("readonly", (st) => st.get(k)), put: (k, v) => tx("readwrite", (st) => st.put(v, k)) };
+})();
 async function loadArt(tiles) {
   const queue = [...tiles];
   const worker = async () => {
     for (let t; (t = queue.shift());) {
       const id = BigInt(t.dataset.id);
+      if (!artCache.has(id)) {
+        const saved = await artDb.get(`uri:${S.credits}:${id}`);
+        if (saved) { artCache.set(id, saved); }
+      }
       if (!artCache.has(id)) {
         const uri = await tryRead("tokenURI", [id], S.credits, CREDITS_ABI);
         let img = null, tier = null, print = null;
@@ -408,6 +522,7 @@ async function loadArt(tiles) {
           print = attr.Print;
         } catch {}
         artCache.set(id, { img, tier, print });
+        if (img) artDb.put(`uri:${S.credits}:${id}`, { img, tier, print });
       }
       const { img, tier, print } = artCache.get(id);
       if (img && !t.querySelector("img")) t.prepend(el("img", { src: img, alt: `Credit #${id}` }));
@@ -463,7 +578,7 @@ $("select-all").onclick = () => {
 };
 $("approve").onclick = () => send("Approve", "setApprovalForAll", [S.pool, true], undefined, S.credits, CREDITS_ABI);
 $("deposit").onclick = async () => {
-  const fee = await read("depositFee").catch(() => null);
+  const fee = await readFresh("depositFee").catch(() => null);
   if (fee == null) return toast("Price oracle is stale, try again shortly", true);
   const ids = [...S.selected];
   const txs = Math.ceil(ids.length / MAX_PER_TX);
@@ -491,8 +606,8 @@ $("deposit").onclick = async () => {
     // landing somewhere unexpected. 5% fee buffer against price moves; the pool refunds the excess.
     const due = fee * BigInt(chunk.length); // $1 per Credit
     if (!(await send(label, "depositAt", [chunk, ...expect], due + due / 20n))) break;
-    const openNow = await read("openBatchId");
-    expect = [openNow, (await read("batchInfo", [openNow]))[1]];
+    const openNow = await readFresh("openBatchId");
+    expect = [openNow, (await readFresh("batchInfo", [openNow]))[1]];
   }
 };
 
@@ -535,7 +650,7 @@ async function renderMyBatches() {
   const ids = [...new Set(logs.map((l) => l.args.batchId))].sort((a, b) => (a < b ? 1 : -1));
   renderClaims(ids);
   const cards = (await Promise.all(ids.map((b) => batchCard(b, true)))).filter(Boolean);
-  box.replaceChildren(...(cards.length ? cards : [el("p", { class: "muted" }, "You haven't deposited yet.")]));
+  box.replaceChildren(...(cards.length ? cards : [el("p", { class: "muted" }, "You haven't deposited yet. Pick Credits above to join the open batch.")]));
 }
 
 // Filter tabs. "voting" covers batches waiting on a price; "sold" covers every finished batch.
@@ -611,9 +726,11 @@ async function batchCard(b, mineOnly = false) {
 
   const kv = el("dl", { class: "kv" });
   let bids = null;
+  let tally = null; // vote count: rendered, so it must be part of the reuse signature
   const row = (k, v) => kv.append(el("dt", {}, k), el("dd", {}, v));
+  const pct = (n) => `${((Number(n) / 80) * 100).toFixed(n % 4n === 0n ? 0 : 1)}%`;
   row("Depositors", String(depositors));
-  if (me) row("Your slots", `${slots}/80`);
+  if (me && slots) row("Your share", `${slots} of 80 · ${pct(slots)}`);
   if (st >= 2 && st <= 5) row("Statement", `#${statementId}`);
   if (state === "Assembled") {
     // Tally votes client-side (≤ 80 depositors) so everyone can see how close the vote is.
@@ -623,23 +740,23 @@ async function batchCard(b, mineOnly = false) {
       Promise.all(addrs.map((a) => read("reservePref", [b, a]))),
     ]);
     const voted = counts.reduce((sum, n, i) => (prefs[i] ? sum + n : sum), 0n);
-    row("Votes", `${voted}/80 slots${voted * 2n > PER ? " · quorum reached" : ` · needs ${PER / 2n + 1n}`}`);
-    row("Reserve", noReserve ? (reserve ? `${eth(reserve)} (lowest vote, unsold 30d)` : "none (unsold 30d, no votes)")
-      : reserve == null ? "set once >40 slots vote" : eth(reserve));
-    if (!noReserve) row("Reserve drops", el("span", { "data-ends": String(assembledAt + NO_RESERVE_AFTER) }, dur(assembledAt + NO_RESERVE_AFTER - now())));
-    if (me && slots) row("Your vote", pref ? eth(pref) : "—");
+    tally = voted;
+    row("Voted", `${voted} of 80${voted * 2n > PER ? " · enough to start" : ` · need 41`}`);
+    row("Minimum price", noReserve ? (reserve ? `${ethUsd(reserve)} (lowest vote)` : "none")
+      : reserve == null ? "decided once 41 vote" : ethUsd(reserve));
+    if (me && slots) row("Your minimum", pref ? ethUsd(pref) : "not voted");
   }
   if (state === "Auction") {
-    row("Reserve", auctionReserve ? eth(auctionReserve) : "none");
-    row("High bid", highBid ? `${eth(highBid)} · ${short(highBidder)}` : "no bids");
+    row("Minimum price", auctionReserve ? ethUsd(auctionReserve) : "none");
+    row("High bid", highBid ? `${ethUsd(highBid)} · ${short(highBidder)}` : "no bids yet");
     row("Ends", el("span", { "data-ends": String(endsAt) }, dur(endsAt - now())));
     bids = await bidHistory(b);
   }
   if (state === "Settled") {
     bids = await bidHistory(b);
-    row("Sold for", eth(highBid));
-    row("After 1% fee", eth(proceeds));
-    if (me && slots) row("Your share", `${eth((proceeds * slots) / PER)}${claimed ? " · claimed" : ""}`);
+    row("Sold for", ethUsd(highBid));
+    row("Split among depositors", `${eth(proceeds)} (after the 1% fee)`);
+    if (me && slots) row("You get", `${ethUsd((proceeds * slots) / PER)}${claimed ? " · collected" : ""}`);
   }
 
   const actions = el("div", { class: "actions" });
@@ -652,10 +769,10 @@ async function batchCard(b, mineOnly = false) {
       actions.append(btn(`Withdraw my ${slots}`, async () => {
         // A dissolved batch keeps its old id list; a Credit withdrawn from it and re-deposited
         // elsewhere must not be pulled from its new batch, so check both depositor AND batch.
-        const all = await read("batchCredits", [b]);
+        const all = await readFresh("batchCredits", [b]);
         const [owners, homes] = await Promise.all([
-          Promise.all(all.map((id) => read("depositorOf", [id]))),
-          Promise.all(all.map((id) => read("batchOf", [id]))),
+          Promise.all(all.map((id) => readFresh("depositorOf", [id]))),
+          Promise.all(all.map((id) => readFresh("batchOf", [id]))),
         ]);
         const mine = all.filter((_, i) => owners[i].toLowerCase() === me.toLowerCase() && homes[i] === b);
         send(`Withdraw ${mine.length}`, "withdraw", [mine]);
@@ -703,8 +820,12 @@ async function batchCard(b, mineOnly = false) {
   }
   if (state === "Auction") {
     if (now() < endsAt) {
-      let min = highBidder === "0x0000000000000000000000000000000000000000" ? auctionReserve : highBid + (highBid * 500n) / 10000n;
+      // Mirrors CreditPool.bid: +5%, and at least +1 wei when 5% rounds to zero.
+      const step = (highBid * 500n) / 10000n;
+      let min = highBidder === "0x0000000000000000000000000000000000000000" ? auctionReserve : highBid + (step === 0n ? 1n : step);
       if (min === 0n) min = 1n;
+      // What winning really costs a depositor: the bid minus their slots/80 share of it after the 1% fee.
+      const netCost = (v) => v - ((v - v / 100n) * slots) / PER;
       const i = input("Bid (ETH)", formatEther(min));
       actions.append(el("div", { class: "row" }, i, btn("Bid", () => {
         const v = toWei(i.value);
@@ -714,11 +835,22 @@ async function batchCard(b, mineOnly = false) {
           "Your ETH is held by the pool until the auction ends. You can't cancel a bid.",
           "If someone outbids you, it's returned: collect it under \"Ready to collect\".",
           "If you win, the Statement goes to your wallet when the auction is settled.",
+          ...(me && slots ? [`You hold ${slots}/80 slots, so if you win, ${eth(v - netCost(v), 4)} of this comes back to you: the Statement really costs you ${eth(netCost(v), 4)}.`] : []),
         ], "Place bid").then((ok) => ok && send(`Bid on #${b}`, "bid", [b], v));
       }, "", "bid")));
       actions.append(el("span", { class: "muted small" }, `min ${eth(min, 6)} · bids in the last 15m extend it`));
-      if (me && slots) actions.append(el("span", { class: "muted small" },
-        `Price too low? Outbid. If you win, ${slots}/80 of what you pay (after the 1% fee) comes back to you.`));
+      if (me && slots) {
+        // Live: recompute from whatever is in the bid box.
+        const hint = el("span", { class: "muted small" });
+        const update = () => {
+          const v = toWei(i.value) ?? min;
+          hint.textContent = `You're a depositor. If you bid and win, ${slots}/80 of the sale comes back to you: ` +
+            `winning at ${eth(v, 4)} really costs you about ${eth(netCost(v), 4)}. Bid if you think it's going too cheap.`;
+        };
+        i.addEventListener("input", update);
+        update();
+        actions.append(hint);
+      }
     } else {
       actions.append(btn("Settle auction", () => send(`Settle #${b}`, "settle", [b]), "", "settle"));
     }
@@ -755,9 +887,18 @@ async function batchCard(b, mineOnly = false) {
   const showArt = S.art && (["Full", "Assembled", "Auction", "Settled", "Redeemed"].includes(state) || (state === "Filling" && filled > 0n));
   const mosaic = showArt ? mosaicButton(b, statementId, state) : null;
 
+  // Same data as last render → return the existing element untouched.
+  const sig = JSON.stringify([info, auction, escape, noReserve, assembledAt, slots, pref, claimed, reserve,
+    bids?.length ?? 0, tally, state === "Auction" && now() < endsAt, me, S.viewOnly],
+  (_, v) => (typeof v === "bigint" ? v.toString() : v));
+  const cacheKey = `${mineOnly ? "mine" : "all"}:${b}`;
+  const cached = S.cards.get(cacheKey);
+  if (cached && cached.sig === sig) return cached.el;
+
   const tagText = state === "Full" && escape ? "Full · escape open" : state;
-  return el("div", { class: "batch" },
+  const card = el("div", { class: "batch" },
     el("div", { class: "batch-top" }, el("b", {}, `Batch #${b}`), el("span", { class: `tag ${state}` }, tagText)),
+    nextStep({ state, filled, escape, noReserve, tally, reserve, slots, me, pref, highBid, endsAt, claimed, proceeds, assembledAt }),
     el("div", { class: "bar", title: `${filled}/80` }, el("i", { style: `width:${(Number(filled) / 80) * 100}%` })),
     el("span", { class: "muted small" }, `${filled}/80 Credits`),
     mosaic,
@@ -766,13 +907,15 @@ async function batchCard(b, mineOnly = false) {
     who,
     actions.childElementCount ? actions : null,
   );
+  S.cards.set(cacheKey, { sig, el: card });
+  return card;
 }
 
 // ───────────────────────── Statement viewer ─────────────────────────
 // A few RPC calls at a time, so 80-Credit mosaics don't flood public nodes.
 const limit = (() => {
   let active = 0; const q = [];
-  const next = () => { if (active >= 6 || !q.length) return; active++; const [fn, ok, no] = q.shift(); fn().then(ok, no).finally(() => { active--; next(); }); };
+  const next = () => { if (active >= 24 || !q.length) return; active++; const [fn, ok, no] = q.shift(); fn().then(ok, no).finally(() => { active--; next(); }); };
   return (fn) => new Promise((ok, no) => { q.push([fn, ok, no]); next(); });
 })();
 const memo = (fn) => { const m = new Map(); return (k) => (m.has(k) ? m.get(k) : (m.set(k, fn(k)), m.get(k))); };
@@ -781,9 +924,14 @@ const creditSeed = memo((id) => limit(() => Promise.all([
   read("seedOf", [id], S.credits, CREDITS_ABI), read("timestampOf", [id], S.credits, CREDITS_ABI),
 ])));
 const creditImg = memo(async (id) => {
+  const key = `svg:${S.credits}:${id}`;
+  const hit = await artDb.get(key);
+  if (hit) return hit;
   const [seed, ts] = await creditSeed(id);
   const svg = await limit(() => read("svg", [seed, ts], S.art, ART_ABI));
-  return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+  const url = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+  artDb.put(key, url);
+  return url;
 });
 const creditTraits = memo(async (id) => {
   const [seed, ts] = await creditSeed(id);
@@ -825,8 +973,73 @@ function fillImgs(imgs, ids) {
   imgs.forEach((img, i) => creditImg(ids[i]).then((src) => (img.src = src)).catch((e) => console.warn(`Credit #${ids[i]} art`, e)));
 }
 
-function mosaicButton(b, sid, state) {
+// The 80-Credit mosaic grid, loaded lazily when it scrolls into view.
+function mosaicGrid(b, state) {
   const grid = el("span", { class: "mosaic-grid" });
+  const io = new IntersectionObserver(async ([e]) => {
+    if (!e.isIntersecting) return;
+    io.disconnect();
+    const ids = await batchIds(b, state);
+    const imgs = ids.map(() => el("img", { alt: "", loading: "lazy" }));
+    const empty = Array.from({ length: 80 - ids.length }, () => el("i", { class: "slot" }));
+    grid.replaceChildren(...imgs, ...empty);
+    fillImgs(imgs, ids);
+  });
+  io.observe(grid);
+  return grid;
+}
+
+// ───────────────────────── Statements gallery ─────────────────────────
+const GALLERY_STATES = ["Assembled", "Auction", "Settled", "Redeemed"];
+const GALLERY_LABEL = { Assembled: "Voting", Auction: "Live auction", Settled: "Sold", Redeemed: "Redeemed" };
+
+async function renderGallery() {
+  const made = (S.byState ?? []).filter(([, st]) => GALLERY_STATES.includes(st));
+  $("stat-statements") && ($("stat-statements").textContent = String(made.length));
+  $("gallery-section").hidden = made.length === 0;
+  $("gallery-count").textContent = made.length ? `(${made.length})` : "";
+  const tiles = await Promise.all(made.map(([b, st]) => galleryTile(b, st)));
+  $("gallery").replaceChildren(...tiles);
+}
+
+async function galleryTile(b, state) {
+  const [info, auction, reserve] = await Promise.all([
+    read("batchInfo", [b]), read("auctions", [b]), tryRead("auctionReserve", [b]),
+  ]);
+  const sid = info[3];
+  const [, highBid, , endsAt] = auction;
+  const owner = await tryRead("ownerOf", [sid], S.statements, STATEMENTS_ABI);
+  const sig = JSON.stringify([state, info, auction, reserve, owner, state === "Auction" && now() < endsAt, S.account],
+    (_, v) => (typeof v === "bigint" ? v.toString() : v));
+  const cached = S.tiles.get(b);
+  if (cached && cached.sig === sig) return cached.el;
+
+  const official = await statementImg(sid);
+  const art = official ? el("img", { class: "official-thumb", src: official, alt: `Statement #${sid}` }) : mosaicGrid(b, state);
+  const line = state === "Assembled" ? (reserve == null ? "Voting on a minimum price" : `Minimum ${eth(reserve)}, ready to auction`)
+    : state === "Auction" ? (highBid ? `High bid ${eth(highBid)}` : `No bids yet · min ${eth(auction[2])}`)
+    : state === "Settled" ? `Sold for ${eth(highBid)}`
+    : "Taken by its sole holder";
+  const who = !owner ? "—"
+    : owner.toLowerCase() === S.pool.toLowerCase() ? "Held by the pool for its depositors"
+    : S.account && owner.toLowerCase() === S.account.toLowerCase() ? "Owned by you"
+    : `Owned by ${short(owner)}`;
+  const tile = el("button", {
+    class: "stile", "aria-label": `Statement #${sid}, ${GALLERY_LABEL[state]}`, "data-tip": "viewStatement",
+    onclick: () => openViewer(b, sid, state),
+  },
+    el("span", { class: "stile-art" }, art),
+    el("span", { class: "stile-top" }, el("b", {}, `Statement #${sid}`), el("span", { class: `tag ${state}` }, GALLERY_LABEL[state])),
+    el("span", { class: "stile-line" }, line),
+    state === "Auction" && now() < endsAt ? el("span", { class: "muted small" }, "Ends in ", el("span", { "data-ends": String(endsAt) }, dur(endsAt - now()))) : null,
+    el("span", { class: "muted small" }, `${who} · batch #${b}`),
+  );
+  S.tiles.set(b, { sig, el: tile });
+  return tile;
+}
+
+function mosaicButton(b, sid, state) {
+  const grid = mosaicGrid(b, state);
   const box = el("button", {
     class: "mosaic", "data-tip": state === "Filling" || state === "Full" ? "viewBatch" : "viewStatement", "aria-label": `View the 80 Credits in batch #${b}`,
     onclick: () => openViewer(b, sid, state),
@@ -834,17 +1047,6 @@ function mosaicButton(b, sid, state) {
     state === "Filling" ? "Credits in this batch so far · click to view"
     : state === "Full" ? "The 80 Credits in this batch · click to view"
     : `Statement #${sid} · made from these 80 Credits · click to view`));
-  // Load only when the card scrolls into view.
-  const io = new IntersectionObserver(async ([e]) => {
-    if (!e.isIntersecting) return;
-    io.disconnect();
-    const ids = await batchIds(b, state);
-    const imgs = ids.map((id) => el("img", { alt: "", loading: "lazy" }));
-    const empty = Array.from({ length: 80 - ids.length }, () => el("i", { class: "slot" }));
-    grid.replaceChildren(...imgs, ...empty);
-    fillImgs(imgs, ids);
-  });
-  io.observe(box);
   return box;
 }
 
@@ -889,6 +1091,40 @@ async function openViewer(b, sid, state) {
     line("Print", prints, ["Registered", "Nudge", "Slip", "Skew", "Drift", "Loose"]),
     line("Plates", Object.fromEntries(Object.entries(plates).map(([k, v]) => [`${k}-plate`, v]))),
   );
+}
+
+// One plain sentence per card: what's happening and what anyone (or you) can do next.
+function nextStep(x) {
+  const mine = x.me && x.slots;
+  const t = (s) => el("p", { class: "next" }, s);
+  switch (x.state) {
+    case "Filling":
+      return t(`Filling: ${80n - x.filled} more Credits needed.${mine ? " You can withdraw yours until it's full." : " Deposit yours above to join."}`);
+    case "Full":
+      return t(x.escape
+        ? "Full, but not assembled for 14 days: depositors can now take their Credits back, or anyone can still assemble it."
+        : "Full. Anyone can press Assemble to burn these 80 Credits into a Statement.");
+    case "Assembled": {
+      if (x.noReserve) return t("Unsold for 30 days, so the minimum is now the lowest vote. Anyone can start the auction.");
+      const started = x.tally * 2n > PER;
+      if (!started) {
+        const need = PER / 2n + 1n - x.tally;
+        return t(`Waiting for depositors to vote a minimum price: ${need} more slots needed.${mine && !x.pref ? " Enter yours below." : ""}`);
+      }
+      return t(`Votes are in: minimum ${eth(x.reserve)}. Anyone can start the 24-hour auction.`);
+    }
+    case "Auction":
+      return now() < x.endsAt
+        ? el("p", { class: "next" }, `Auction live${x.highBid ? `: high bid ${eth(x.highBid)}` : ", no bids yet"}. Ends in `,
+          el("span", { "data-ends": String(x.endsAt) }, dur(x.endsAt - now())), ". Anyone can bid.")
+        : t("Auction over. Anyone can press Settle to send the Statement to the winner and pay the depositors.");
+    case "Settled":
+      return t(mine ? (x.claimed ? "Sold, and you've collected your share." : `Sold. Your share is ready: ${eth((x.proceeds * x.slots) / PER)}.`)
+        : "Sold. Depositors can collect their share.");
+    case "Redeemed": return t("Taken whole by the depositor who held all 80 slots.");
+    case "Dissolved": return t(mine ? "Dissolved. Withdraw your Credits below." : "Dissolved: depositors took their Credits back.");
+    default: return null;
+  }
 }
 
 function tick() {

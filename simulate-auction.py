@@ -15,6 +15,7 @@ Simulated wallets act through anvil impersonation, so this only works on the loc
 Real people (like you in the browser) are never acted for; they click their own buttons.
 """
 import json, math, random, re, subprocess, sys, time, urllib.request
+from decimal import Decimal
 
 RPC = "http://127.0.0.1:8545"
 CREDITS = "0x97630aA70AB14ed9883B41dAfccBc11349723043"
@@ -132,7 +133,7 @@ def start(b):
 def bid(b, amount, who=None):
     who = who or rng.choice(BIDDERS)
     fund(who, 1000)
-    send(who, "bid(uint256)", b, value=int(float(amount) * ETH))
+    send(who, "bid(uint256)", b, value=int(Decimal(str(amount)) * ETH))  # exact: floats drift by a few wei
     print(f"  {short(who)} bid {amount} ETH")
 
 def war(b, up_to):

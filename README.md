@@ -88,6 +88,16 @@ python3 serve.py   # no-cache static server for app/
 Open `http://localhost:5173/?dev=0` (or `dev=1..3`; `dev=3` holds 250 Credits) to act as an anvil account without a wallet.
 Skip auction time with `cast rpc evm_increaseTime 90000 && cast rpc evm_mine`.
 
+Mainnet-fork demo with real Credits, 50 simulated depositors, and step-by-step auction tooling:
+```
+./demo-fork.sh && python3 simulate-participants.py && python3 serve.py
+python3 simulate-auction.py status 0        # also: fill, assemble, vote, start, bid, war, skip, settle, claim
+```
+End-to-end concept test (fresh fork; every lifecycle path with money and NFTs checked, 33 checks):
+```
+./demo-fork.sh && python3 e2e-concept.py
+```
+
 ## Launch checklist (once Statements is live)
 1. Swap `IStatementAssembler` in `src/CreditPool.sol` for the real call. Mirror it in `test/Mocks.sol` and `ForkStatements` in the fork test.
    - If Statements exposes a supply or cap, make `deposit` revert once the cap is hit (open finding above).

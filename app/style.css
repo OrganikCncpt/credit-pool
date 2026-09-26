@@ -111,3 +111,28 @@ dialog#confirm::backdrop { background: rgb(0 0 0 / .6); }
 .confirm-actions { justify-content: flex-end; }
 /* a transaction is in flight: make action buttons look unavailable (send() also refuses) */
 body.sending .batch button, body.sending #deposit, body.sending #collect-all, body.sending #approve { opacity: .5; cursor: progress; }
+/* Statements gallery */
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.stile { display: flex; flex-direction: column; gap: 6px; padding: 10px; text-align: left; background: var(--card); color: var(--fg); border: 1px solid var(--line); cursor: zoom-in; }
+.stile:hover, .stile:focus-visible { border-color: var(--fg); }
+.stile-art { display: block; aspect-ratio: 10 / 8; overflow: hidden; background: var(--line); }
+.stile-art .mosaic-grid { min-height: 0; }
+.official-thumb { width: 100%; height: 100%; object-fit: contain; display: block; background: #fff; }
+.stile-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.stile-line { font-size: 13px; }
+/* next step line on each card */
+.next { margin: 0; font-size: 13px; line-height: 1.45; padding: 8px 10px; background: color-mix(in srgb, var(--fg) 6%, transparent); border-left: 2px solid var(--fg); }
+/* questions + safety */
+.faq { border-top: 1px solid var(--line); padding-top: 18px; }
+.faq h2 { margin-bottom: 10px; }
+.faq details { border-bottom: 1px solid var(--line); padding: 10px 0; }
+.faq summary { cursor: pointer; font-weight: 600; }
+.faq details p { margin: 8px 0 0; color: var(--muted); max-width: 720px; }
+.safety { margin: 0; padding-left: 18px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
+.safety a, .faq a { color: var(--fg); }
+.mono { font-family: inherit; }
+/* phones: keep the header on one line */
+@media (max-width: 560px) {
+  header #chain { display: none; }
+  header #connect { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; padding: 6px 10px; }
+}
