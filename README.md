@@ -100,21 +100,33 @@ End-to-end concept test (fresh fork; every lifecycle path with money and NFTs ch
 
 ## Testnet (Sepolia)
 
-A full public rehearsal: Jack's real `Credits` source, loaded with 400 real mainnet seeds (same
+A full public rehearsal: Jack's real `Credits` source, loaded with real mainnet seeds (same
 art), a stand-in Statements contract that burns through the real `burn(owner, ids)`, and
 CreditPool on Sepolia's Chainlink ETH/USD feed.
 
 ```bash
-python3 script/export-testnet-seeds.py 400 > script/testnet-seeds.json   # already committed
-TESTERS=0xA…,0xB… PER_TESTER=80 FEE_RECIPIENT=0x… \
-forge script script/DeployTestnet.s.sol --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
+python3 script/export-testnet-seeds.py 4200 > script/testnet-seeds.json   # already committed
+TESTERS=0xA…,0xB… COUNTS=80,40 FEE_SCALE=100 FUND_WEI=6000000000000000 FEE_RECIPIENT=0x… \
+forge script script/DeployTestnet.s.sol --tc DeployTestnet --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
   --broadcast --slow --interactives 1
 ```
 
-Then set `pool` and `deployBlock` for chain 11155111 in `app/config.js` (and `DEFAULT_CHAIN`).
-Rehearsed on an anvil fork of Sepolia: 9 transactions, about 67M gas in total, largest 11.9M
-(`distribute` is chunked at 80 mints to stay well under the 16.77M per-transaction cap).
-Don't use anvil's default keys as testers on Sepolia: they are public and delegated to sweepers.
+- `COUNTS`: Credits per tester (or `PER_TESTER` for all). `FUND_WEI`: gas money sent to each tester.
+- `FEE_SCALE=100` makes the deposit fee $0.01 for testing: the pool reads a `ScaledFeed` that passes
+  Chainlink through with the price ×100 (timestamps untouched, so the stale fallback still works).
+  Set `feeUsd: 0.01` on the chain in `app/config.js` so the site shows the right dollars.
+- Then set `pool` and `deployBlock` for chain 11155111 in `app/config.js` (and `DEFAULT_CHAIN`).
+- Gas: about 149k per Credit minted (`distribute` is chunked at 80 mints, max 11.9M gas per tx,
+  well under the 16.77M cap), plus about 11M for the contracts. 4,080 Credits ≈ 617M gas.
+- Don't use anvil's default keys as testers on Sepolia: they are public and delegated to sweepers.
+
+Full-scale local rehearsal (a copy of Sepolia on anvil, chain 31337, so the demo modes work):
+
+```bash
+TESTERS=<you>,<100 burners> COUNTS=80,40,…,40 FEE_SCALE=100 ./demo-testnet.sh
+python3 simulate-burners.py burners.txt   # every batch state: sold, live, voting, full, filling
+python3 serve.py                          # http://localhost:5173/?as=<your address>
+```
 
 ## Launch checklist (once Statements is live)
 1. Swap `IStatementAssembler` in `src/CreditPool.sol` for the real call. Mirror it in `test/Mocks.sol` and `ForkStatements` in the fork test.

@@ -37,7 +37,7 @@
       <li><b>Deposit</b><span>Add any number of Credits to the open batch. Withdraw any time until it fills.</span></li>
       <li><b>Assemble</b><span>At 80, the batch locks and burns into one Statement, held for its depositors.</span></li>
       <li><b>Vote &amp; auction</b><span>Depositors vote a minimum price, then a 24h auction open to anyone.</span></li>
-      <li><b>Collect</b><span>Your share = your Credits ÷ 80 of the sale. Fees: $1 per Credit deposited, 1% of the sale.</span></li>
+      <li><b>Collect</b><span>Your share = your Credits ÷ 80 of the sale. Fees: <span class="fee-usd">$1</span> per Credit deposited, 1% of the sale.</span></li>
     </ol>
     <div class="stats" id="stats"></div>
   </section>
@@ -92,9 +92,9 @@
     <details><summary>What is a Statement?</summary>
       <p>Jack Butcher's Credits burn 80 at a time into one Statement. Each X account could mint at most 50 Credits, so most people can't reach 80 alone. Credit Pool lets holders combine them.</p></details>
     <details><summary>What does it cost?</summary>
-      <p>$1 per Credit you deposit, paid in ETH at the current price (if the price feed is ever offline, a fixed ETH amount set at launch is used instead, so deposits never stop), plus 1% of each auction sale. Redeeming a whole Statement (holding all 80) has no sale fee. Nothing else: no cut of your Credits, no other fees.</p></details>
+      <p><span class="fee-usd">$1</span> per Credit you deposit, paid in ETH at the current price (if the price feed is ever offline, a fixed ETH amount set at launch is used instead, so deposits never stop), plus 1% of each auction sale. Redeeming a whole Statement (holding all 80) has no sale fee. Nothing else: no cut of your Credits, no other fees.</p></details>
     <details><summary>Can I get my Credits back?</summary>
-      <p>Yes, any time while the batch is still filling: open it under Your batches and press Withdraw. Once a batch reaches 80 it locks. If a full batch isn't assembled within 14 days, depositors can take their Credits back. The $1 fee isn't refunded.</p></details>
+      <p>Yes, any time while the batch is still filling: open it under Your batches and press Withdraw. Once a batch reaches 80 it locks. If a full batch isn't assembled within 14 days, depositors can take their Credits back. The <span class="fee-usd">$1</span> fee isn't refunded.</p></details>
     <details><summary>How is the price decided?</summary>
       <p>Each depositor votes the lowest price they'd accept. The minimum is the lowest price that more than 40 of the batch's 80 slots accept, so a small group can't sell it cheap. Then anyone can bid for 24 hours; each bid must beat the last by 5%, and a bid in the last 15 minutes adds 15 minutes.</p></details>
     <details><summary>What if nobody bids, or the price is set too high?</summary>

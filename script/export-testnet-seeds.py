@@ -5,7 +5,7 @@
 Reads seedOf(id) and timestampOf(id) for ids 1..N from the real Credits contract (both survive
 burns). Output: {"seeds": [...bytes21 hex...], "timestamps": [...]} in id order.
 """
-import json, subprocess, sys
+import json, subprocess, sys, time
 
 RPC = "https://ethereum-rpc.publicnode.com"
 CREDITS = "0x97630aA70AB14ed9883B41dAfccBc11349723043"
@@ -15,8 +15,15 @@ def batch(calls):
     body = json.dumps([{"jsonrpc": "2.0", "id": i, "method": "eth_call",
                         "params": [{"to": CREDITS, "data": d}, "latest"]} for i, d in enumerate(calls)]).encode()
     # curl, not urllib: python.org builds on macOS often ship without CA certs
-    out = json.loads(subprocess.run(["curl", "-sf", "-H", "Content-Type: application/json", "--data-binary", "@-", RPC],
-                                    input=body, capture_output=True, check=True).stdout)
+    for attempt in range(6):  # public RPCs drop or rate-limit long runs: back off and retry
+        r = subprocess.run(["curl", "-sf", "-H", "Content-Type: application/json", "--data-binary", "@-", RPC],
+                           input=body, capture_output=True)
+        try:
+            out = json.loads(r.stdout)
+            if isinstance(out, list) and all("result" in x for x in out): break
+        except ValueError: pass
+        time.sleep(2 ** attempt)
+    else: sys.exit("RPC kept failing")
     return [r["result"] for r in sorted(out, key=lambda r: r["id"])]
 
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 400

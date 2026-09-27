@@ -89,13 +89,13 @@ const TIPS = {
   approve: "Step 1 of 2: approve the pool, then deposit. " +
     "It's a one-time permission, and the pool only ever moves Credits you deposit yourself. You can revoke it any time.",
   selectAll: "Select every Credit in this wallet. Click a Credit to toggle it.",
-  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: $1 per Credit, paid in ETH. " +
+  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {fee} per Credit, paid in ETH. " +
     "You can withdraw any time until the batch reaches 80.",
   depositNeedsApproval: "Approve the pool first (one time), then pick Credits.",
   depositNeedsPick: "Click the Credits you want to deposit first.",
   depositViewOnly: "View-only: connect this wallet to deposit.",
   withdraw: "Take your Credits back to your wallet. Possible while the batch is still filling, " +
-    "or if a full batch can't be assembled for 14 days. The $1 fee isn't refunded.",
+    "or if a full batch can't be assembled for 14 days. The {fee} fee isn't refunded.",
   assemble: "Burns this batch's 80 Credits into one Statement, held by the pool for its depositors. " +
     "Anyone can press this. It's permanent.",
   redeem: "You hold all 80 slots, so the Statement is yours: sends it straight to your wallet. No auction, no fee.",
@@ -111,12 +111,12 @@ const TIPS = {
   collect: "Sends everything waiting for you to your wallet: your share of each sold Statement, plus any outbid refunds. One transaction per item.",
   viewStatement: "See what's being sold: the 80 Credits burned into this Statement, with their rarity breakdown.",
   viewBatch: "See the Credits in this batch so far, with their rarity breakdown.",
-  sweep: "Sends collected platform fees ($1 per Credit deposited + 1% of sales) to the fee wallet. Anyone can trigger it; it can only go there.",
+  sweep: "Sends collected platform fees ({fee} per Credit deposited + 1% of sales) to the fee wallet. Anyone can trigger it; it can only go there.",
 };
 
 const tipEl = () => document.getElementById("tip");
 function showTip(target) {
-  const text = TIPS[target.dataset.tip] ?? target.dataset.tip;
+  const text = (TIPS[target.dataset.tip] ?? target.dataset.tip)?.replaceAll("{fee}", feeUsd());
   if (!text) return;
   const t = tipEl();
   t.textContent = text; t.hidden = false;
@@ -162,6 +162,8 @@ const eth = (wei, dp = 4) => {
   const t = f.slice(0, dp).replace(/0+$/, "");
   return `${i}${t ? "." + t : ""} ETH`;
 };
+// Fees can be tiny (a testnet cent is ~0.0000037 ETH): keep two significant digits.
+const ethFee = (wei) => eth(wei, Math.max(5, 20 - wei.toString().length));
 // Number inputs → wei, or null for anything that isn't a plain non-negative amount.
 const toWei = (v) => {
   v = String(v).trim();
@@ -169,10 +171,14 @@ const toWei = (v) => {
   try { return parseEther(v); } catch { return null; }
 };
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
-// ≈ USD for an ETH amount. depositFee() is exactly $1 in wei (Chainlink ETH/USD), so $ = wei ÷ fee.
+// The deposit fee in USD: $1 on mainnet; a testnet can set feeUsd in config.js (its feed is scaled to match).
+const FEE_USD = () => S.dep?.feeUsd ?? 1;
+const dollars = (d) => `$${Number.isInteger(d) ? d.toLocaleString("en-US") : d.toFixed(2)}`;
+const feeUsd = (n = 1) => dollars(FEE_USD() * Number(n)); // n may be a BigInt count
+// ≈ USD for an ETH amount. depositFee() is exactly FEE_USD in wei (Chainlink ETH/USD), so $ = wei ÷ fee × FEE_USD.
 const usd = (wei) => {
-  if (!S.fee || S.feeFallback || wei == null) return ""; // the fallback fee isn't exactly $1
-  const d = Number(wei) / Number(S.fee);
+  if (!S.fee || S.feeFallback || wei == null) return ""; // the fallback fee isn't exact
+  const d = (Number(wei) / Number(S.fee)) * FEE_USD();
   return ` (≈ $${d >= 100 ? Math.round(d).toLocaleString("en-US") : d.toFixed(2)})`;
 };
 const ethUsd = (wei, dp) => eth(wei, dp) + usd(wei);
@@ -247,6 +253,7 @@ async function init() {
   S.chain = chainFor(S.chainId, S.dep, hasMulticall);
   S.pub = createPublicClient({ chain: S.chain, transport, batch: hasMulticall ? { multicall: { wait: 10 } } : undefined });
   $("chain").textContent = S.dep.name;
+  for (const f of document.querySelectorAll(".fee-usd")) f.textContent = feeUsd();
   if (!S.dep.pool) return switchNotice(`credit.pool isn't deployed on ${S.dep.name} yet. It goes live once the Statements contract is published.`);
   S.pool = S.dep.pool;
   if (S.chainId !== 31337 && !S.dep.deployBlock) console.warn("config.js: set deployBlock, or 'Your batches' may fail on public RPCs");
@@ -291,7 +298,7 @@ async function init() {
   if (S.account && !S.viewOnly) $("revoke-link").href = `https://revoke.cash/address/${S.account}`;
   if (S.chainId === 31337) {
     const who = S.demoAs ? `You're acting as ${short(S.account)}.` : S.viewOnly ? `Viewing ${short(S.account)} read-only.` : "";
-    $("demo").textContent = `Local demo on a copy of Ethereum mainnet: test ETH only, nothing here touches real Credits or real money. ${who}`;
+    $("demo").textContent = `Local demo on a copy of ${S.dep.forkOf ?? "Ethereum mainnet"}: test ETH only, nothing here touches real Credits or real money. ${who}`;
     $("demo").hidden = false;
   } else if (S.dep.testnet) {
     $("demo").textContent = `Testnet (${S.dep.name}): test ETH and test copies of Credits only. Nothing here is real money or real Credits.`;
@@ -461,7 +468,7 @@ async function renderStats() {
     stat(`${filled} / 80`, `Credits in the open batch (#${open})`),
     stat(String(open), "batches filled so far"),
     el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
-    stat(fee == null ? "unavailable" : eth(fee, 5), fallback ? "fee per Credit (fixed fallback: price feed offline)" : "fee per Credit ($1)"),
+    stat(fee == null ? "unavailable" : ethFee(fee), fallback ? "fee per Credit (fixed fallback: price feed offline)" : `fee per Credit (${feeUsd()})`),
     stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
@@ -588,11 +595,11 @@ function updateDepositHint() {
   if (!S.approved) return ($("deposit-hint").textContent = "Approve the pool once, then pick Credits to deposit.");
   if (!n) return ($("deposit-hint").textContent = "Pick Credits to deposit (rarest shown first). Every Credit counts as one slot, whatever its rarity. You can withdraw until the batch fills.");
   const txs = Math.ceil(Number(n) / MAX_PER_TX);
-  if (txs > 1) return ($("deposit-hint").textContent = `${n} Credits → ${txs} transactions of up to ${MAX_PER_TX} (gas limit). $1 per Credit, $${n} total.`);
+  if (txs > 1) return ($("deposit-hint").textContent = `${n} Credits → ${txs} transactions of up to ${MAX_PER_TX} (gas limit). ${feeUsd()} per Credit, ${feeUsd(n)} total.`);
   const room = PER - S.openFilled;
   $("deposit-hint").textContent = n <= room
-    ? `Goes into batch #${S.openBatch} (${S.openFilled + n}/80 after). Fee: $1 per Credit, $${n} total.`
-    : `Fills batch #${S.openBatch} with ${room}, the other ${n - room} spill into the next batch${n - room > PER ? "es" : ""}. Fee: $${n} ($1 per Credit).`;
+    ? `Goes into batch #${S.openBatch} (${S.openFilled + n}/80 after). Fee: ${feeUsd()} per Credit, ${feeUsd(n)} total.`
+    : `Fills batch #${S.openBatch} with ${room}, the other ${n - room} spill into the next batch${n - room > PER ? "es" : ""}. Fee: ${feeUsd(n)} (${feeUsd()} per Credit).`;
 }
 
 $("select-all").onclick = () => {
@@ -619,21 +626,21 @@ $("deposit").onclick = async () => {
     ids.length <= room
       ? `They go into batch #${shownBatch}, taking it to ${shownFilled + BigInt(ids.length)}/80.`
       : `${room} fill batch #${shownBatch}; the rest start the next batch.`,
-    `Fee: $1 per Credit, so $${ids.length} total (≈ ${eth(fee * BigInt(ids.length), 5)})${txs > 1 ? `, across ${txs} transactions` : ""}. Not refunded if you withdraw.`,
+    `Fee: ${feeUsd()} per Credit, so ${feeUsd(ids.length)} total (≈ ${ethFee(fee * BigInt(ids.length))})${txs > 1 ? `, across ${txs} transactions` : ""}. Not refunded if you withdraw.`,
     "You can withdraw them any time until their batch reaches 80. After that they're locked in.",
   ], "Deposit");
   if (!ok) return;
   // The first tx is pinned to the batch state the user just confirmed; later chunks follow our own deposits.
   let expect = [shownBatch, shownFilled];
   S.selected.clear();
-  // Split big deposits under the per-tx gas cap. Each tx pays the $1 fee.
+  // Split big deposits under the per-tx gas cap. Each tx pays its own fee.
   const chunks = [];
   for (let i = 0; i < ids.length; i += MAX_PER_TX) chunks.push(ids.slice(i, i + MAX_PER_TX));
   for (const [i, chunk] of chunks.entries()) {
     const label = chunks.length > 1 ? `Deposit ${i + 1}/${chunks.length} (${chunk.length})` : `Deposit ${chunk.length}`;
     // Pin the batch we showed the user: if someone deposits first, the tx reverts instead of
     // landing somewhere unexpected. 5% fee buffer against price moves; the pool refunds the excess.
-    const due = fee * BigInt(chunk.length); // $1 per Credit
+    const due = fee * BigInt(chunk.length); // fee per Credit
     if (!(await send(label, "depositAt", [chunk, ...expect], due + due / 20n))) break;
     const openNow = await readFresh("openBatchId");
     expect = [openNow, (await readFresh("batchInfo", [openNow]))[1]];

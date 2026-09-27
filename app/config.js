@@ -14,6 +14,7 @@ export const DEPLOYMENTS = {
     pool: null, // ← CreditPool address from script/DeployTestnet.s.sol
     deployBlock: 0n,
     explorer: "https://sepolia.etherscan.io",
+    feeUsd: 0.01, // matches FEE_SCALE=100 in DeployTestnet; remove for a real-fee deploy
     testnet: true,
   },
   31337: {
