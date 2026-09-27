@@ -8,6 +8,14 @@ export const DEPLOYMENTS = {
     deployBlock: 0n,
     explorer: "https://etherscan.io",
   },
+  11155111: {
+    name: "Sepolia",
+    rpc: "https://ethereum-sepolia-rpc.publicnode.com",
+    pool: null, // ← CreditPool address from script/DeployTestnet.s.sol
+    deployBlock: 0n,
+    explorer: "https://sepolia.etherscan.io",
+    testnet: true,
+  },
   31337: {
     name: "Local demo",
     rpc: "http://127.0.0.1:8545",

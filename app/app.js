@@ -238,7 +238,7 @@ async function init() {
   }
 
   S.dep = DEPLOYMENTS[S.chainId];
-  if (!S.dep) return notice(`Unsupported network (chain ${S.chainId}). Switch to ${Object.values(DEPLOYMENTS).map((d) => d.name).join(" or ")}.`);
+  if (!S.dep) return switchNotice(`Unsupported network (chain ${S.chainId}).`);
   S.chain = chainFor(S.chainId, S.dep);
   // Many small reads → a few requests: JSON-RPC batching always, plus Multicall3 if it exists here.
   const transport = http(S.dep.rpc, { batch: { batchSize: 100, wait: 10 } });
@@ -247,7 +247,7 @@ async function init() {
   S.chain = chainFor(S.chainId, S.dep, hasMulticall);
   S.pub = createPublicClient({ chain: S.chain, transport, batch: hasMulticall ? { multicall: { wait: 10 } } : undefined });
   $("chain").textContent = S.dep.name;
-  if (!S.dep.pool) return notice(`credit.pool isn't deployed on ${S.dep.name} yet. It goes live once the Statements contract is published.`);
+  if (!S.dep.pool) return switchNotice(`credit.pool isn't deployed on ${S.dep.name} yet. It goes live once the Statements contract is published.`);
   S.pool = S.dep.pool;
   if (S.chainId !== 31337 && !S.dep.deployBlock) console.warn("config.js: set deployBlock, or 'Your batches' may fail on public RPCs");
 
@@ -293,6 +293,9 @@ async function init() {
     const who = S.demoAs ? `You're acting as ${short(S.account)}.` : S.viewOnly ? `Viewing ${short(S.account)} read-only.` : "";
     $("demo").textContent = `Local demo on a copy of Ethereum mainnet: test ETH only, nothing here touches real Credits or real money. ${who}`;
     $("demo").hidden = false;
+  } else if (S.dep.testnet) {
+    $("demo").textContent = `Testnet (${S.dep.name}): test ETH and test copies of Credits only. Nothing here is real money or real Credits.`;
+    $("demo").hidden = false;
   }
   renderConnect();
   await refresh();
@@ -303,6 +306,29 @@ async function init() {
 
 function notice(msg) {
   const n = $("notice"); n.textContent = msg; n.hidden = false;
+}
+
+// Wallet on a chain without a live pool: one click to the chain that has one (adds it if missing).
+function switchNotice(msg) {
+  const target = Object.entries(DEPLOYMENTS).find(([id, d]) => d.pool && +id !== 31337 && +id !== S.chainId);
+  notice(target ? `${msg} credit.pool is live on ${target[1].name}.` : msg);
+  renderConnect();
+  if (!target || !window.ethereum || !S.account) return;
+  const [id, d] = target;
+  const chainId = "0x" + Number(id).toString(16);
+  const b = el("button", {}, `Switch to ${d.name}`);
+  b.onclick = async () => {
+    try {
+      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId }] });
+    } catch (e) {
+      if (e.code !== 4902) return toast(e.message, true);
+      await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+        chainId, chainName: d.name, rpcUrls: [d.rpc], nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+        blockExplorerUrls: d.explorer ? [d.explorer] : undefined,
+      }] }).catch((e2) => toast(e2.message, true));
+    }
+  }; // the wallet's chainChanged event reloads the page
+  $("notice").append(" ", b);
 }
 
 function renderConnect() {

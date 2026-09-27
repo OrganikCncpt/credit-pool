@@ -98,6 +98,24 @@ End-to-end concept test (fresh fork; every lifecycle path with money and NFTs ch
 ./demo-fork.sh && python3 e2e-concept.py
 ```
 
+## Testnet (Sepolia)
+
+A full public rehearsal: Jack's real `Credits` source, loaded with 400 real mainnet seeds (same
+art), a stand-in Statements contract that burns through the real `burn(owner, ids)`, and
+CreditPool on Sepolia's Chainlink ETH/USD feed.
+
+```bash
+python3 script/export-testnet-seeds.py 400 > script/testnet-seeds.json   # already committed
+TESTERS=0xA…,0xB… PER_TESTER=80 FEE_RECIPIENT=0x… \
+forge script script/DeployTestnet.s.sol --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
+  --broadcast --slow --interactives 1
+```
+
+Then set `pool` and `deployBlock` for chain 11155111 in `app/config.js` (and `DEFAULT_CHAIN`).
+Rehearsed on an anvil fork of Sepolia: 9 transactions, about 67M gas in total, largest 11.9M
+(`distribute` is chunked at 80 mints to stay well under the 16.77M per-transaction cap).
+Don't use anvil's default keys as testers on Sepolia: they are public and delegated to sweepers.
+
 ## Launch checklist (once Statements is live)
 1. Swap `IStatementAssembler` in `src/CreditPool.sol` for the real call. Mirror it in `test/Mocks.sol` and `ForkStatements` in the fork test.
    - If Statements exposes a supply or cap, make `deposit` revert once the cap is hit (open finding above).

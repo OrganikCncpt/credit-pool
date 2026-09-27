@@ -39,12 +39,12 @@ contract CreditPoolForkTest is Test {
     function setUp() public {
         string memory rpc = vm.envOr("MAINNET_RPC", string(""));
         if (bytes(rpc).length == 0) return;
-        vm.createSelectFork(rpc);
+        vm.createSelectFork(rpc, 26_059_000); // pinned: live holders move, "latest" made this flaky
 
         stmts = new ForkStatements(CREDITS);
         pool = new CreditPool(address(CREDITS), address(stmts), address(stmts), ETH_USD, block.timestamp, address(this));
 
-        holder = CREDITS.ownerOf(3); // a wallet holding 80+ Credits
+        holder = 0xc8f8e2F59Dd95fF67c3d39109ecA2e2A017D4c8a; // holds 330+ Credits at this block
         uint256[] memory owned = CREDITS.tokensOf(holder);
         require(owned.length >= 80, "pick another holder");
         for (uint256 i; i < 80; ++i) ids.push(owned[i]);

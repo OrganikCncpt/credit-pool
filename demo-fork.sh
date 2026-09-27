@@ -40,4 +40,6 @@ s = re.sub(r'(31337: \{[^}]*?pool: )"0x[0-9a-fA-F]+"', r'\1"%s"' % sys.argv[1], 
 s = re.sub(r'deployBlock: \d+n, // mainnet-fork demo', 'deployBlock: %sn, // mainnet-fork demo' % sys.argv[2], s)
 open(p, "w").write(s)
 PY
-echo "fork block $BN · pool $POOL · wallet0 50 Credits · wallet1 40 Credits"
+# Report what each wallet actually holds (the source holder's supply can run low over time).
+B0=$(cast call $C "balanceOf(address)(uint256)" $A0 --rpc-url $R); B1=$(cast call $C "balanceOf(address)(uint256)" $A1 --rpc-url $R)
+echo "fork block $BN · pool $POOL · wallet0 $B0 Credits · wallet1 $B1 Credits"

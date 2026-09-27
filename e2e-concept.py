@@ -31,7 +31,8 @@ def W(x): return int(Decimal(str(x)) * 10**18)   # exact ETH -> wei
 def wallet(n): return "0x" + format(0xC0FFEE0000000000000000000000000000000000 + 5000 + n, "040x")
 
 # Real Credits come from a large holder plus the two demo wallets (all impersonated on the fork).
-SOURCES = [sa.DONOR, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"]
+SOURCES = [sa.DONOR, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+           "0x48138f98cBd6e958A9606075db045A8dBa682D59"]  # another large real holder (impersonated on the fork only)
 donor_ids = []
 for src in SOURCES:
     sa.rpc("anvil_impersonateAccount", src); sa.fund(src)
