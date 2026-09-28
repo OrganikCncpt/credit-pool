@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 
 contract Handler is Test {
@@ -24,7 +25,7 @@ contract Handler is Test {
         n = bound(n, 1, 120);
         uint256[] memory ids = new uint256[](n);
         for (uint256 i; i < n; ++i) { credits.mint(u, nextId); ids[i] = nextId++; inPool.push(ids[i]); }
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(u); pool.deposit{value: fee}(ids);
     }
 
@@ -70,7 +71,7 @@ contract InvariantTest is Test {
         stmts = new MockStatements(credits);
         stmts.setCap(type(uint256).max);
         MockFeed feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
         h = new Handler(pool, credits);
         targetContract(address(h));
     }

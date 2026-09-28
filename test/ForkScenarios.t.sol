@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 import {ICredits, ForkStatements} from "./CreditPool.fork.t.sol";
 
 /// Bug hunt against REAL Credits and the REAL Chainlink ETH/USD feed on a pinned mainnet fork.
@@ -24,7 +25,7 @@ contract ForkScenariosTest is Test {
         if (bytes(rpc).length == 0) return;
         vm.createSelectFork(rpc, FORK_BLOCK);
         stmts = new ForkStatements(CREDITS);
-        pool = new CreditPool(address(CREDITS), address(stmts), address(stmts), ETH_USD, block.timestamp, address(this));
+        pool = deployPool(address(CREDITS), address(stmts), address(stmts), ETH_USD, block.timestamp, address(this));
         owned = CREDITS.tokensOf(WHALE);
         require(owned.length >= 330, "whale too small at this block");
         vm.deal(WHALE, 100 ether);
@@ -42,7 +43,7 @@ contract ForkScenariosTest is Test {
         for (uint256 i; i < n; ++i) ids[i] = owned[from + i];
     }
     function _deposit(uint256[] memory ids) internal returns (uint256 gasUsed) {
-        uint256 fee = pool.depositFee() * ids.length;
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(WHALE);
         uint256 g = gasleft();
         pool.deposit{value: fee}(ids);
@@ -80,13 +81,13 @@ contract ForkScenariosTest is Test {
     // M-01 with the real feed: once Chainlink's answer is over a day old, deposits use the frozen fallback.
     function test_ForkM01_RealFeedGoesStaleDepositsContinue() public forked {
         uint256 fb = pool.fallbackFeeWei();
-        assertEq(fb, pool.depositFee(), "fallback frozen at deploy = live fee then");
+        assertEq(fb, pool.usdWei(), "fallback frozen at deploy = live fee then");
         assertFalse(pool.feeUsesFallback());
         vm.warp(block.timestamp + 2 days);                 // the fork's feed can't update: now stale
         assertTrue(pool.feeUsesFallback());
-        assertEq(pool.depositFee(), fb);
+        assertEq(pool.usdWei(), fb);
         _deposit(_slice(0, 3));
-        assertEq(pool.accruedFees(), fb * 3);
+        assertEq(pool.accruedFees(), fb * 3 * 2); // 3 Credits at $2 (under the bulk rate)
         assertEq(CREDITS.ownerOf(owned[0]), address(pool));
     }
 
@@ -114,7 +115,7 @@ contract ForkScenariosTest is Test {
         (, uint256 f4,,,,) = pool.batchInfo(4);
         assertEq(f4, 10);
         assertEq(CREDITS.tokensOf(address(pool)).length, total, "real Credits' owner list agrees");
-        assertEq(pool.accruedFees(), pool.depositFee() * total);
+        assertEq(pool.accruedFees(), pool.depositFeeFor(total));
     }
 
     // Real Credits keeps a per-owner token list; deposit / withdraw / re-deposit / burn must keep it exact.

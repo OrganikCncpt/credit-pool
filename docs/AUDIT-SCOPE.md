@@ -22,12 +22,19 @@ most holders can't reach 80 alone. Credit Pool lets holders pool Credits:
    (`setReserve`); the reserve is the lowest price that more than 40 of the 80 slots accept.
    Anyone starts a 24h English **auction** (`startAuction` / `startAuctionAt`): 5% minimum
    raise, 15-minute anti-snipe extension, pull refunds for outbid bidders.
-4. **`settle`** sends the Statement to the winner and books the sale: 1% to fees, 99% split
+4. **`settle`** sends the Statement to the winner and books the sale: 100% split
    by slots. Each depositor **`claim`s** their share.
 5. Safety valves: after 30 days unsold, quorum is dropped and the minimum becomes the lowest
    vote cast. A full batch that can't be assembled becomes withdrawable after 14 days.
 
-Revenue: $1 per Credit deposited plus 1% of each sale, swept (permissionless) to `feeRecipient`.
+Revenue: a deposit fee of $2 per Credit ($1 each for 6+ at once), swept (permissionless) 25% to
+`feeRecipient` and 75% to the `CreditStore` treasury; plus $0.25 per store bid. No sale fee.
+6. **Store** (`CreditStore`, new since audit #1): 2 non-transferable SCREDIT points per Credit deposited;
+   the treasury buys only Statements whose auction ended with no bids (opening bid at the depositors'
+   minimum, capped, owner-triggered); those Statements are auctioned for SCREDIT only.
+
+> **Scope changed after external audit #1:** the fee model, `CreditStore`, and the pool's calls into it
+> (`store.award` in `_deposit`, the 25/75 sweep, `unsoldAuctions`) are new and need review.
 
 ## 2. Scope
 
@@ -40,6 +47,7 @@ Previously audited: tag `audit-prep-1`, commit `30d172a`.
 |---|---:|---|
 | `src/CreditPool.sol` | 401 | Batches, custody, voting, auction, payouts, fees |
 | `src/AssemblyVault.sol` | 59 | Custody firewall between the pool and the Statements contract |
+| `src/CreditStore.sol` | ~130 | **New since audit #1:** SCREDIT points, treasury (buy-unsold only), SCREDIT store auction |
 | `src/IStatementAssembler.sol` | 4 | **Placeholder** for the unpublished Statements interface |
 | `script/Deploy.s.sol` | 36 | Mainnet deploy with parameter guards |
 | **Total** | **500** | |

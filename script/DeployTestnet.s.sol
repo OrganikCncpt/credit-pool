@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {CreditPool, AggregatorV3Interface} from "../src/CreditPool.sol";
 import {Credits} from "../external/credits/Credits.sol";
+import {CreditStore} from "../src/CreditStore.sol";
 import {ForkStatements, ICredits} from "../test/CreditPool.fork.t.sol";
 
 /// Testnet only: passes the real Chainlink feed through with the price multiplied by `scale`,
@@ -29,7 +30,8 @@ contract ScaledFeed is AggregatorV3Interface {
 ///
 /// TESTERS:    comma-separated wallets to receive Credits (default: the deployer).
 /// COUNTS:     Credits for each tester, same order (default: PER_TESTER each, or all seeds split evenly).
-/// FEE_SCALE:  deposit fee = $1 / FEE_SCALE (default 1 = the real $1; 100 = $0.01).
+/// FEE_SCALE:  every $ amount (deposit fee, $0.25 bid fee) ÷ FEE_SCALE (default 1; 100 → $0.02/$0.01 per Credit).
+/// MAX_TREASURY_BID: cap for the store's buy-unsold bids (default 0.01 ETH).
 /// FUND_WEI:   ETH sent to each tester other than the deployer, for gas (default 0).
 /// Seeds come from script/testnet-seeds.json.
 contract DeployTestnet is Script {
@@ -84,7 +86,10 @@ contract DeployTestnet is Script {
 
         if (feeScale > 1) feed = address(new ScaledFeed(AggregatorV3Interface(feed), int256(feeScale)));
         ForkStatements stmts = new ForkStatements(ICredits(address(credits)));
-        CreditPool pool = new CreditPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient);
+        CreditStore store = new CreditStore();
+        CreditPool pool = new CreditPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient, address(store));
+        store.setPool(address(pool));
+        store.setMaxTreasuryBid(vm.envOr("MAX_TREASURY_BID", uint256(0.01 ether)));
         if (fund > 0) {
             for (uint256 i; i < testers.length; ++i) {
                 if (testers[i] == deployer) continue;
@@ -100,8 +105,10 @@ contract DeployTestnet is Script {
         console.log("statements:", address(stmts));
         console.log("pool:", address(pool));
         console.log("vault:", address(pool.vault()));
+        console.log("store:", address(store));
         console.log("fee scale ($1 /):", feeScale);
-        console.log("fee per Credit (wei):", pool.depositFee());
+        console.log("fee, 1 Credit (wei):", pool.depositFeeFor(1));
+        console.log("fee, 6 Credits (wei):", pool.depositFeeFor(6));
         console.log("Credits minted:", total);
         console.log("testers:", testers.length);
     }

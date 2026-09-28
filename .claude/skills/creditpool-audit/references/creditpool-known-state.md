@@ -19,9 +19,13 @@ a disagreement is itself a finding.
   one **Statement** via `IStatementAssembler` (a PLACEHOLDER: the real Statements
   contract is unpublished). The Statement is redeemed by a sole 80-slot holder or sold
   by on-chain English auction; proceeds split pro-rata by slots.
-- Platform revenue: `$1` per Credit deposited (in ETH via Chainlink ETH/USD; `depositFee()` is per Credit), plus
-  `SALE_FEE_BPS = 100` (1%) of each settled sale. Both accrue to `accruedFees`;
-  `sweepFees` (permissionless) sends to `feeRecipient`.
+- Fees (changed 2026-09-28, after external audit #1): deposit `$2` per Credit, or `$1` each for 6+ in one
+  deposit (`depositFeeFor(n)`; `usdWei()` = $1 in wei). No sale fee (SALE_FEE_BPS removed).
+  `sweepFees` (permissionless) sends 25% to `feeRecipient`, 75% to the store.
+- `src/CreditStore.sol` (NEW, not yet externally audited): SCREDIT non-transferable points (2 per Credit,
+  awarded by the pool in `_deposit`), the treasury (spent only via owner-triggered `buyUnsold` on batches
+  with `unsoldAuctions(b) > 0`, opening bid = the depositors' own reserve, capped), and the SCREDIT-only store
+  auction ($0.25 ETH platform fee per bid). Linked to the pool once via `setPool`.
 - `app/`: static frontend (viem from jsdelivr, pinned 2.56.8, no build). `config.js`
   per-chain addresses. Chain 31337 is a local mainnet-fork demo.
 - `script/Deploy.s.sol` (mainnet), `script/DeployLocal.s.sol`, `script/DeployFork.s.sol`.

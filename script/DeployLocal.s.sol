@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 import {Script, console} from "forge-std/Script.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {CreditStore} from "../src/CreditStore.sol";
 import {MockCredits, MockStatements, MockFeed} from "../test/Mocks.sol";
 
 /// Local anvil stack with mocks. Mints Credits to the first four anvil accounts.
@@ -22,9 +23,11 @@ contract DeployLocal is Script {
         MockCredits credits = new MockCredits();
         MockStatements stmts = new MockStatements(credits);
         MockFeed feed = new MockFeed(2500e8);
+        CreditStore store = new CreditStore();
         CreditPool pool = new CreditPool(
-            address(credits), address(stmts), address(stmts), address(feed), block.timestamp, users[0]
+            address(credits), address(stmts), address(stmts), address(feed), block.timestamp, users[0], address(store)
         );
+        store.setPool(address(pool));
         uint256 id = 1;
         for (uint256 u; u < 4; ++u) {
             for (uint256 i; i < counts[u]; ++i) credits.mint(users[u], id++);
@@ -34,5 +37,6 @@ contract DeployLocal is Script {
         console.log("credits:", address(credits));
         console.log("statements:", address(stmts));
         console.log("pool:", address(pool));
+        console.log("store:", address(store));
     }
 }

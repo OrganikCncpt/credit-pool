@@ -13,10 +13,19 @@ Deposit Credits, not ETH. Every 80 deposited Credits burn into one Statement, he
    - If the Statement is still unsold 30 days after assembly, anyone can start a **no-reserve** auction. A majority can't trap the minority with an unreachable reserve.
 5. **Escape hatch**: a full batch that can't be assembled (cap reached, contract blocks vaults) becomes withdrawable 14 days after it filled or assembly opened, whichever is later. Assembly stays possible until someone actually withdraws.
 
-Platform revenue (`sweepFees` → `feeRecipient`):
-- $1 per Credit deposited (in ETH via Chainlink), e.g. $80 per full batch
-- 1% of every auction sale, taken at `settle` (`SALE_FEE_BPS`, a constant that can't be raised). Depositors split the other 99%.
-- Redeeming a Statement with all 80 slots is not a sale and pays no cut.
+Fees (all constants; in ETH via Chainlink ETH/USD):
+- Deposit: $2 per Credit, or $1 per Credit for a deposit of 6+ in one transaction (`depositFeeFor(n)`).
+  `sweepFees` (permissionless) splits it: 25% to `feeRecipient`, 75% to the store's treasury.
+- Auction sales carry **no fee**: depositors split 100% of the price.
+
+The store (`src/CreditStore.sol`):
+- **SCREDIT** ("Store Credit"): 2 non-transferable points per Credit deposited (`transfer`/`approve` revert).
+- **Treasury** (75% of deposit fees): spent only by `buyUnsold(batch)`, owner-triggered, and only for a batch
+  whose pool auction already ended with no bids. It opens a new auction with a bid at exactly the depositors'
+  own minimum, capped by `maxTreasuryBid`; anyone can outbid it for 24h. No function sends treasury ETH anywhere else.
+- **Store auction**: Statements the treasury holds are auctioned for SCREDIT only (24h, +5%, 15-min anti-snipe).
+  Every bid pays a $0.25 platform fee in ETH (`sweepBidFees` → `feeRecipient`). Outbid points come straight
+  back; the winner's points are burned.
 
 ## Before deploying
 - `IStatementAssembler` is a **placeholder**. Replace it with the real Credits/Statement interface once it's published.

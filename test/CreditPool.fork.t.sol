@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 
 interface ICredits {
     function ownerOf(uint256) external view returns (address);
@@ -42,7 +43,7 @@ contract CreditPoolForkTest is Test {
         vm.createSelectFork(rpc, 26_059_000); // pinned: live holders move, "latest" made this flaky
 
         stmts = new ForkStatements(CREDITS);
-        pool = new CreditPool(address(CREDITS), address(stmts), address(stmts), ETH_USD, block.timestamp, address(this));
+        pool = deployPool(address(CREDITS), address(stmts), address(stmts), ETH_USD, block.timestamp, address(this));
 
         holder = 0xc8f8e2F59Dd95fF67c3d39109ecA2e2A017D4c8a; // holds 330+ Credits at this block
         uint256[] memory owned = CREDITS.tokensOf(holder);
@@ -62,7 +63,7 @@ contract CreditPoolForkTest is Test {
     }
 
     function test_Fork_RealFeedFeeIsSane() public forked {
-        uint256 fee = pool.depositFee();
+        uint256 fee = pool.usdWei();
         assertGt(fee, 0.00005 ether); // ETH < $20k
         assertLt(fee, 0.002 ether);   // ETH > $500
     }
@@ -70,7 +71,7 @@ contract CreditPoolForkTest is Test {
     function test_Fork_DepositWithdrawRealCredits() public forked {
         uint256[] memory five = new uint256[](5);
         for (uint256 i; i < 5; ++i) five[i] = ids[i];
-        uint256 fee = pool.depositFee() * five.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(five.length);
         vm.prank(holder); pool.deposit{value: fee}(five);
         assertEq(CREDITS.ownerOf(five[0]), address(pool));
         assertEq(CREDITS.tokensOf(address(pool)).length, 5);
@@ -82,7 +83,7 @@ contract CreditPoolForkTest is Test {
 
     function test_Fork_AssembleBurnsRealCredits() public forked {
         assertTrue(CREDITS.isSealed());
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(holder); pool.deposit{value: fee}(ids);
         uint256 g = gasleft();
         pool.assemble(0);

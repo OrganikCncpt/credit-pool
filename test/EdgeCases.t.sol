@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 import {AssemblyVault} from "../src/AssemblyVault.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 
@@ -55,7 +56,7 @@ contract EdgeCasesTest is Test {
     }
 
     function _pool(address assembler) internal returns (CreditPool p) {
-        p = new CreditPool(address(credits), assembler, assembler, address(feed), block.timestamp, address(this));
+        p = deployPool(address(credits), assembler, assembler, address(feed), block.timestamp, address(this));
         for (uint256 i; i < 3; ++i) { vm.prank([alice, bob, eve][i]); credits.setApprovalForAll(address(p), true); }
     }
     function _give(address to, uint256 n) internal returns (uint256[] memory ids) {
@@ -64,7 +65,7 @@ contract EdgeCasesTest is Test {
     }
     function _deposit(CreditPool p, address who, uint256 n) internal returns (uint256[] memory ids) {
         ids = _give(who, n);
-        uint256 fee = p.depositFee() * n;
+        uint256 fee = p.depositFeeFor(n);
         vm.prank(who); p.deposit{value: fee}(ids);
     }
 
@@ -74,13 +75,22 @@ contract EdgeCasesTest is Test {
         pool.deposit(none);
     }
 
-    function test_FeeIsPerCredit() public {
-        uint256[] memory ids = _give(alice, 5);
-        uint256 perCredit = pool.depositFee();
+    // $2 per Credit for 1–5 Credits in one deposit; $1 per Credit for 6 or more.
+    function test_FeeTiers() public {
+        uint256 usd = pool.usdWei();
+        assertEq(pool.depositFeeFor(1), usd * 2);
+        assertEq(pool.depositFeeFor(5), usd * 10);
+        assertEq(pool.depositFeeFor(6), usd * 6);   // 6 cost less than 5: the bulk rate covers the whole deposit
+        assertEq(pool.depositFeeFor(100), usd * 100);
+        uint256[] memory five = _give(alice, 5);
         vm.prank(alice); vm.expectRevert(CreditPool.InsufficientFee.selector);
-        pool.deposit{value: perCredit * 5 - 1}(ids);
-        vm.prank(alice); pool.deposit{value: perCredit * 5}(ids);
-        assertEq(pool.accruedFees(), perCredit * 5);
+        pool.deposit{value: usd * 10 - 1}(five);
+        vm.prank(alice); pool.deposit{value: usd * 10}(five);
+        uint256[] memory six = _give(bob, 6);
+        vm.prank(bob); vm.expectRevert(CreditPool.InsufficientFee.selector);
+        pool.deposit{value: usd * 6 - 1}(six);
+        vm.prank(bob); pool.deposit{value: usd * 6}(six);
+        assertEq(pool.accruedFees(), usd * 16);
     }
 
     function test_EscapeOpenFalseUnlessFull() public {

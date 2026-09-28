@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 
 /// Findings from external audit #1 (report on tag audit-prep-1, commit 30d172a).
@@ -16,7 +17,7 @@ contract ExternalAudit1Test is Test {
         credits = new MockCredits();
         stmts = new MockStatements(credits);
         feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
         for (uint256 i; i < 3; ++i) {
             address u = [alice, bob, eve][i];
             vm.deal(u, 100 ether);
@@ -29,7 +30,7 @@ contract ExternalAudit1Test is Test {
     }
     function _deposit(address who, uint256 n) internal returns (uint256[] memory ids) {
         ids = _give(who, n);
-        uint256 fee = pool.depositFee() * n;
+        uint256 fee = pool.depositFeeFor(n);
         vm.prank(who); pool.deposit{value: fee}(ids);
     }
 
@@ -51,13 +52,13 @@ contract ExternalAudit1Test is Test {
     function test_H01_FixStillCatchesSwapWithStrayPresent() public {
         // assembler that burns the 80, then pushes a Credit it owns into the vault
         SwapInAssembler sw = new SwapInAssembler(credits);
-        CreditPool p = new CreditPool(address(credits), address(sw.stmts()), address(sw), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(sw.stmts()), address(sw), address(feed), block.timestamp, address(this));
         vm.prank(alice); credits.setApprovalForAll(address(p), true);
         uint256[] memory stray = _give(eve, 1);
         address v = address(p.vault());
         vm.prank(eve); credits.transferFrom(eve, v, stray[0]);
         uint256[] memory ids = _give(alice, 80);
-        uint256 fee = p.depositFee() * 80;
+        uint256 fee = p.depositFeeFor(80);
         vm.prank(alice); p.deposit{value: fee}(ids);
         sw.setCheap(_give(address(sw), 1)[0]);
         vm.expectRevert(CreditPool.CreditsNotBurned.selector);
@@ -88,7 +89,7 @@ contract ExternalAudit1Test is Test {
     function test_L03_FutureDatedRoundUsesFallback() public {
         feed.set(1000e8, block.timestamp + 1 hours);
         assertTrue(pool.feeUsesFallback());
-        assertEq(pool.depositFee(), pool.fallbackFeeWei());
+        assertEq(pool.usdWei(), pool.fallbackFeeWei());
     }
 
     // M-01: deposits keep working at the frozen fallback fee when the feed stops answering entirely.
@@ -96,29 +97,33 @@ contract ExternalAudit1Test is Test {
         uint256 fb = pool.fallbackFeeWei();
         feed.setBroken(true);
         assertTrue(pool.feeUsesFallback());
-        assertEq(pool.depositFee(), fb);
+        assertEq(pool.usdWei(), fb);
         uint256[] memory ids = _give(alice, 3);
         vm.prank(alice); vm.expectRevert(CreditPool.InsufficientFee.selector);
         pool.deposit{value: fb * 3 - 1}(ids);
         vm.prank(alice); pool.deposit{value: 1 ether}(ids);  // excess refunded
-        assertEq(pool.accruedFees(), fb * 3);
+        assertEq(pool.accruedFees(), fb * 3 * 2); // 3 Credits at $2, priced with the fallback
         feed.setBroken(false);                                // feed recovers: live pricing resumes
         assertFalse(pool.feeUsesFallback());
     }
 
     // M-01: the fallback can only be frozen from a healthy feed; a stale feed at deploy is refused.
     function test_M01_DeployRequiresHealthyFeed() public {
+        address st = address(pool.store()); // read first: a call here would consume expectRevert
         feed.set(2500e8, block.timestamp - 2 days);
         vm.expectRevert(CreditPool.StaleOracle.selector);
-        new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this), st);
     }
 
     // L-04: the constructor refuses addresses with no code for its contract dependencies.
     function test_L04_ConstructorRejectsNonContracts() public {
+        address st = address(pool.store()); // read first: a call here would consume expectRevert
         vm.expectRevert(CreditPool.NotAContract.selector);
-        new CreditPool(address(0xBEEF), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        new CreditPool(address(0xBEEF), address(stmts), address(stmts), address(feed), block.timestamp, address(this), st);
         vm.expectRevert(CreditPool.NotAContract.selector);
-        new CreditPool(address(credits), address(stmts), address(stmts), address(0xBEEF), block.timestamp, address(this));
+        new CreditPool(address(credits), address(stmts), address(stmts), address(0xBEEF), block.timestamp, address(this), st);
+        vm.expectRevert(CreditPool.NotAContract.selector);   // the store must be a contract too
+        new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this), address(0xBEEF));
     }
 
     // I-05: after assembly, burned Credits no longer report a depositor or batch.

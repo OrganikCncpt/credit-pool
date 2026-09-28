@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 
 /// Assembler that burns 80 but "returns" a Statement the pool already holds.
@@ -37,7 +38,7 @@ contract AttacksTest is Test {
         credits = new MockCredits();
         stmts = new MockStatements(credits);
         feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
         for (uint256 i; i < 3; ++i) {
             address u = [alice, bob, eve][i];
             vm.deal(u, 100 ether);
@@ -55,7 +56,7 @@ contract AttacksTest is Test {
     }
     function _deposit(address who, uint256 n) internal returns (uint256[] memory ids) {
         ids = _give(who, n);
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(who); pool.deposit{value: fee}(ids);
     }
 
@@ -67,7 +68,7 @@ contract AttacksTest is Test {
         assertFalse(pool.feeUsesFallback());
         feed.set(2500e8, block.timestamp - 1 days - 1);
         assertTrue(pool.feeUsesFallback());
-        assertEq(pool.depositFee(), pool.fallbackFeeWei());
+        assertEq(pool.usdWei(), pool.fallbackFeeWei());
     }
 
     // ── FIXED 2: stray safeTransfers bounce instead of getting stuck ──
@@ -81,7 +82,7 @@ contract AttacksTest is Test {
     // ── FIXED 3: assembler returning an already-held Statement id is rejected ──
     function test_Fixed_AssemblerCannotDoubleAssign() public {
         LyingAssembler liar = new LyingAssembler(stmts);
-        CreditPool p2 = new CreditPool(address(credits), address(stmts), address(liar), address(feed), block.timestamp, address(this));
+        CreditPool p2 = deployPool(address(credits), address(stmts), address(liar), address(feed), block.timestamp, address(this));
         // pool legitimately holds Statement #1 from somewhere (e.g. someone sent it)
         uint256[] memory x = _give(address(this), 80);
         credits.setApprovalForAll(address(stmts), true);
@@ -91,7 +92,7 @@ contract AttacksTest is Test {
         liar.setLie(sid);
         vm.prank(alice); credits.setApprovalForAll(address(p2), true);
         uint256[] memory ids = _give(alice, 80);
-        uint256 fee = p2.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = p2.depositFeeFor(ids.length);
         vm.prank(alice); p2.deposit{value: fee}(ids);
         vm.expectRevert(CreditPool.StatementNotReceived.selector);
         p2.assemble(0); // whole tx reverts, Credits are not burned
@@ -122,7 +123,7 @@ contract AttacksTest is Test {
         vm.warp(block.timestamp + 25 hours); pool.settle(0);
         uint256 b0 = bob.balance;
         vm.prank(bob); pool.claim(0);
-        assertEq(bob.balance - b0, (0.99 ether * 39) / 80); // bob is out, paid pro-rata after the 1% fee
+        assertEq(bob.balance - b0, (1 ether * 39) / 80);    // bob is out, paid pro-rata (no sale fee)
     }
 
     // ── BY DESIGN 5: majority can lowball, but the minority can outbid within 24h ──
@@ -184,7 +185,7 @@ contract AttacksTest is Test {
     function test_Fixed_DepositAtBlocksFrontRun() public {
         uint256[] memory whaleIds = _give(alice, 80);
         _deposit(eve, 1);                                 // front-runner lands first
-        uint256 fee = pool.depositFee() * whaleIds.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(whaleIds.length);
         vm.prank(alice); vm.expectRevert(CreditPool.BatchMoved.selector);
         pool.depositAt{value: fee}(whaleIds, 0, 0);       // whale expected an empty batch #0
         vm.prank(alice); pool.depositAt{value: fee}(whaleIds, 0, 1); // explicit consent to the new state works
@@ -220,14 +221,14 @@ contract AttacksTest is Test {
     function test_Safe_DuplicateIdsInDeposit() public {
         uint256[] memory one = _give(alice, 1);
         uint256[] memory dup = new uint256[](2); dup[0] = one[0]; dup[1] = one[0];
-        uint256 fee = pool.depositFee() * dup.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(dup.length);
         vm.prank(alice); vm.expectRevert();
         pool.deposit{value: fee}(dup);
     }
 
     function test_Safe_CannotDepositOthersCredits() public {
         uint256[] memory ids = _give(alice, 1);
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(eve); vm.expectRevert();
         pool.deposit{value: fee}(ids); // pool is approved by alice, but eve can't route alice's Credits
     }
@@ -244,7 +245,7 @@ contract AttacksTest is Test {
         vm.prank(alice); vm.expectRevert(CreditPool.NothingToClaim.selector); pool.claim(0);
     }
 
-    /// Fuzz the payout: fee is exactly 1%, claims never exceed the net, dust stays < 80 wei.
+    /// Fuzz the payout: no sale fee, claims never exceed the price, dust stays < 80 wei.
     function testFuzz_ClaimsNeverExceedProceeds(uint8 a, uint96 price) public {
         uint256 na = bound(a, 1, 79);
         price = uint96(bound(price, 1, 1_000_000 ether));
@@ -258,9 +259,8 @@ contract AttacksTest is Test {
         vm.prank(alice); pool.claim(0);
         vm.prank(bob); pool.claim(0);
         uint256 paid = before - address(pool).balance;
-        uint256 fee = (uint256(price) * 100) / 10_000;
         (,,,, uint256 net,) = pool.batchInfo(0);
-        assertEq(net, price - fee);
+        assertEq(net, price);
         assertLe(paid, net);
         assertLt(net - paid, 80);
     }

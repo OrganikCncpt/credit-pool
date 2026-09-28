@@ -11,7 +11,10 @@ const POOL_ABI = parseAbi([
   "function credits() view returns (address)",
   "function openBatchId() view returns (uint256)",
   "function accruedFees() view returns (uint256)",
-  "function depositFee() view returns (uint256)",
+  "function usdWei() view returns (uint256)",
+  "function depositFeeFor(uint256) view returns (uint256)",
+  "function store() view returns (address)",
+  "function unsoldAuctions(uint256) view returns (uint256)",
   "function feeUsesFallback() view returns (bool)",
   "function batchInfo(uint256) view returns (uint8 state, uint256 filled, uint256 depositorCount, uint256 statementId, uint256 proceeds, uint64 fullAt)",
   "function batchCredits(uint256) view returns (uint256[])",
@@ -48,6 +51,22 @@ const POOL_ABI = parseAbi([
   "error ReserveQuorumNotMet()", "error BidTooLow()", "error AuctionLive()", "error NothingToClaim()",
   "error TransferFailed()", "error UnexpectedToken()", "error StatementNotReceived()",
   "error CreditsNotBurned()", "error BatchMoved()", "error ZeroAddress()", "error ReserveChanged()",
+]);
+// The store: SCREDIT points (non-transferable), the treasury, and the SCREDIT-only store auction.
+const STORE_ABI = parseAbi([
+  "function balanceOf(address) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function treasuryBalance() view returns (uint256)",
+  "function bidFees() view returns (uint256)",
+  "function bidFee() view returns (uint256)",
+  "function listings(uint256) view returns (address highBidder, uint256 highBid, uint256 reserve, uint64 endsAt)",
+  "function minBid(uint256) view returns (uint256)",
+  "function bid(uint256 statementId, uint256 points) payable",
+  "function settle(uint256 statementId)",
+  "function sweepBidFees()",
+  "event Listed(uint256 indexed statementId, uint256 reserve, uint64 endsAt)",
+  "error NotListed()", "error AuctionLive()", "error AuctionOver()", "error BidTooLow()",
+  "error InsufficientFee()", "error InsufficientPoints()", "error NonTransferable()",
 ]);
 const CREDITS_ABI = parseAbi([
   "function tokensOf(address) view returns (uint256[])",
@@ -89,13 +108,13 @@ const TIPS = {
   approve: "Step 1 of 2: approve the pool, then deposit. " +
     "It's a one-time permission, and the pool only ever moves Credits you deposit yourself. You can revoke it any time.",
   selectAll: "Select every Credit in this wallet. Click a Credit to toggle it.",
-  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {fee} per Credit, paid in ETH. " +
+  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. Each Credit earns 2 SCREDIT. " +
     "You can withdraw any time until the batch reaches 80.",
   depositNeedsApproval: "Approve the pool first (one time), then pick Credits.",
   depositNeedsPick: "Click the Credits you want to deposit first.",
   depositViewOnly: "View-only: connect this wallet to deposit.",
   withdraw: "Take your Credits back to your wallet. Possible while the batch is still filling, " +
-    "or if a full batch can't be assembled for 14 days. The {fee} fee isn't refunded.",
+    "or if a full batch can't be assembled for 14 days. The deposit fee isn't refunded.",
   assemble: "Burns this batch's 80 Credits into one Statement, held by the pool for its depositors. " +
     "Anyone can press this. It's permanent.",
   redeem: "You hold all 80 slots, so the Statement is yours: sends it straight to your wallet. No auction, no fee.",
@@ -106,17 +125,20 @@ const TIPS = {
   bid: "Your ETH is held by the pool. If you're outbid, you get it back (Withdraw refund at the top). " +
     "Each bid must beat the last by 5%. Bids in the final 15 minutes add 15 minutes.",
   settle: "Ends the auction: the Statement goes to the winner and depositors can claim. Anyone can press this.",
-  claim: "Sends your share of the sale to your wallet: your slots ÷ 80 of the price, after the 1% fee.",
+  claim: "Sends your share of the sale to your wallet: your slots ÷ 80 of the price. Sales carry no fee.",
   refund: "ETH from bids where someone outbid you. Sends it back to your wallet.",
   collect: "Sends everything waiting for you to your wallet: your share of each sold Statement, plus any outbid refunds. One transaction per item.",
   viewStatement: "See what's being sold: the 80 Credits burned into this Statement, with their rarity breakdown.",
   viewBatch: "See the Credits in this batch so far, with their rarity breakdown.",
-  sweep: "Sends collected platform fees ({fee} per Credit deposited + 1% of sales) to the fee wallet. Anyone can trigger it; it can only go there.",
+  sweep: "Splits collected deposit fees: 25% to the platform, 75% to the store treasury (which only buys Statements that failed to sell). Anyone can trigger it; it can only go there.",
+  storeBid: "Bid SCREDIT points, plus a {bidfee} platform fee in ETH per bid. Your points are held while you lead; if you're outbid they come straight back. If you win, they're spent.",
+  storeSettle: "Ends this store auction: the Statement goes to the winner and their points are spent. Anyone can press this.",
+  points: "Store Credit: 2 points for every Credit you deposit. They can't be sent, sold or traded; you can only bid them on Statements in the store.",
 };
 
 const tipEl = () => document.getElementById("tip");
 function showTip(target) {
-  const text = (TIPS[target.dataset.tip] ?? target.dataset.tip)?.replaceAll("{fee}", feeUsd());
+  const text = (TIPS[target.dataset.tip] ?? target.dataset.tip)?.replaceAll("{fee}", feeUsd()).replaceAll("{rule}", feeRule()).replaceAll("{bidfee}", feeUsd(0.25));
   if (!text) return;
   const t = tipEl();
   t.textContent = text; t.hidden = false;
@@ -143,7 +165,7 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") hideTip(); });
 const S = {
   chainId: DEFAULT_CHAIN, dep: null, chain: null, pub: null, wallet: null, account: null,
   pool: null, credits: null, selected: new Set(), cursor: null, clockSkew: 0, approved: false, openBatch: 0n, openFilled: 0n,
-  openWho: new Set(), lastBlock: null, refreshing: false, cards: new Map(), mineSig: null, tiles: new Map(),
+  openWho: new Set(), lastBlock: null, refreshing: false, cards: new Map(), mineSig: null, tiles: new Map(), owners: new Map(), sidBatch: new Map(),
 };
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, ...kids) => {
@@ -173,12 +195,22 @@ const toWei = (v) => {
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 // The deposit fee in USD: $1 on mainnet; a testnet can set feeUsd in config.js (its feed is scaled to match).
 const FEE_USD = () => S.dep?.feeUsd ?? 1;
-const dollars = (d) => `$${Number.isInteger(d) ? d.toLocaleString("en-US") : d.toFixed(2)}`;
+const dollars = (d) => `$${Number.isInteger(d) ? d.toLocaleString("en-US") : d < 0.01 ? String(+d.toPrecision(2)) : d.toFixed(2)}`;
 const feeUsd = (n = 1) => dollars(FEE_USD() * Number(n)); // n may be a BigInt count
+// Deposit fee: $2 per Credit, or $1 each for a deposit of 6+ in one transaction (CreditPool.depositFeeFor).
+const BULK_MIN = 6;
+const perCredit = (n) => (Number(n) >= BULK_MIN ? 1 : 2);
+const feeRule = () => `${feeUsd(2)} per Credit, or ${feeUsd(1)} each when you deposit ${BULK_MIN}+ at once`;
+// Big deposits are split into near-equal transactions under the gas cap, so none falls below the bulk rate.
+const chunkSizes = (n) => {
+  const k = Math.ceil(n / MAX_PER_TX), base = Math.floor(n / k);
+  return Array.from({ length: k }, (_, i) => base + (i < n % k ? 1 : 0));
+};
+const depositUsd = (n) => chunkSizes(Number(n)).reduce((t, c) => t + c * perCredit(c), 0); // in pool dollars
 // ≈ USD for an ETH amount. depositFee() is exactly FEE_USD in wei (Chainlink ETH/USD), so $ = wei ÷ fee × FEE_USD.
 const usd = (wei) => {
   if (!S.fee || S.feeFallback || wei == null) return ""; // the fallback fee isn't exact
-  const d = (Number(wei) / Number(S.fee)) * FEE_USD();
+  const d = (Number(wei) / Number(S.fee)) * FEE_USD(); // S.fee = usdWei(): exactly $1 of pool pricing
   return ` (≈ $${d >= 100 ? Math.round(d).toLocaleString("en-US") : d.toFixed(2)})`;
 };
 const ethUsd = (wei, dp) => eth(wei, dp) + usd(wei);
@@ -253,7 +285,7 @@ async function init() {
   S.chain = chainFor(S.chainId, S.dep, hasMulticall);
   S.pub = createPublicClient({ chain: S.chain, transport, batch: hasMulticall ? { multicall: { wait: 10 } } : undefined });
   $("chain").textContent = S.dep.name;
-  for (const f of document.querySelectorAll(".fee-usd")) f.textContent = feeUsd();
+  for (const f of document.querySelectorAll(".fee-usd")) f.textContent = feeUsd(Number(f.dataset.mult ?? 1));
   if (!S.dep.pool) return switchNotice(`credit.pool isn't deployed on ${S.dep.name} yet. It goes live once the Statements contract is published.`);
   S.pool = S.dep.pool;
   if (S.chainId !== 31337 && !S.dep.deployBlock) console.warn("config.js: set deployBlock, or 'Your batches' may fail on public RPCs");
@@ -280,7 +312,7 @@ async function init() {
 
   try {
     S.credits = await read("credits");
-    [S.art, S.statements] = await Promise.all([tryRead("art", [], S.credits, CREDITS_ABI), tryRead("statements")]);
+    [S.art, S.statements, S.store] = await Promise.all([tryRead("art", [], S.credits, CREDITS_ABI), tryRead("statements"), tryRead("store")]);
   } catch {
     return notice(`Can't reach the pool at ${S.pool} on ${S.dep.name}. Is the RPC up?`);
   }
@@ -292,7 +324,7 @@ async function init() {
   const addr = (label, a) => a && el("span", {}, `${label} `, S.dep.explorer
     ? el("a", { href: `${S.dep.explorer}/address/${a}`, target: "_blank", rel: "noopener" }, short(a)) : short(a));
   $("addr-list").replaceChildren(...[
-    addr("pool", S.pool), " · ", addr("assembly vault", await tryRead("vault")), " · ",
+    addr("pool", S.pool), " · ", addr("assembly vault", await tryRead("vault")), " · ", addr("store", S.store), " · ",
     addr("Credits", S.credits), " · ", addr("Statements", S.statements),
   ].filter(Boolean));
   if (S.account && !S.viewOnly) $("revoke-link").href = `https://revoke.cash/address/${S.account}`;
@@ -382,6 +414,10 @@ const ERROR_TEXT = {
   StatementNotReceived: "The Statement wasn't minted as expected, so nothing was burned.",
   CreditsNotBurned: "The Credits weren't burned as expected, so nothing changed.",
   ZeroAddress: "That address isn't allowed.",
+  InsufficientPoints: "You don't have enough SCREDIT for that bid.",
+  AuctionOver: "That store auction has ended.",
+  NotListed: "That Statement isn't up for auction in the store.",
+  NonTransferable: "SCREDIT can't be transferred.",
 };
 function friendlyError(e) {
   if (e?.name === "UserRejectedRequestError" || e?.code === 4001 || /rejected|denied/i.test(e?.shortMessage ?? "")) {
@@ -429,6 +465,7 @@ async function refresh() {
     await Promise.all([renderStats(), renderMine(), renderMyBatches()]);
     await renderAllPage(true);
     await renderGallery();
+    await renderStore();
     hideTip();
     S.lastRefresh = Date.now();
   } finally {
@@ -444,7 +481,7 @@ async function poll() {
   try {
     const bn = await S.pub.getBlockNumber();
     if (S.lastBlock === null || bn === S.lastBlock) return;
-    const logs = await S.pub.getLogs({ address: S.pool, fromBlock: S.lastBlock + 1n, toBlock: bn }).catch(() => [1]);
+    const logs = await S.pub.getLogs({ address: [S.pool, S.store].filter(Boolean), fromBlock: S.lastBlock + 1n, toBlock: bn }).catch(() => [1]);
     const stale = Date.now() - (S.lastRefresh ?? 0) > SAFETY_REFRESH_MS;
     if ((logs.length || stale) && !document.activeElement?.matches("input")) {
       const blk = await S.pub.getBlock();
@@ -457,8 +494,9 @@ async function poll() {
 
 async function renderStats() {
   const [open, fees, fee, opensAt] = await Promise.all([
-    read("openBatchId"), read("accruedFees"), tryRead("depositFee"), read("assemblyOpensAt"),
+    read("openBatchId"), read("accruedFees"), tryRead("usdWei"), read("assemblyOpensAt"),
   ]);
+  const treasury = S.store ? await tryRead("treasuryBalance", [], S.store, STORE_ABI) : null;
   const fallback = await tryRead("feeUsesFallback");
   S.feeFallback = !!fallback;
   const [, filled] = await read("batchInfo", [open]);
@@ -468,7 +506,8 @@ async function renderStats() {
     stat(`${filled} / 80`, `Credits in the open batch (#${open})`),
     stat(String(open), "batches filled so far"),
     el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
-    stat(fee == null ? "unavailable" : ethFee(fee), fallback ? "fee per Credit (fixed fallback: price feed offline)" : `fee per Credit (${feeUsd()})`),
+    stat(fee == null ? "unavailable" : ethFee(fee * 2n), fallback ? "fee per Credit (fixed fallback: price feed offline)" : `fee per Credit (${feeUsd(2)}; ${feeUsd(1)} each for ${BULK_MIN}+)`),
+    ...(treasury == null ? [] : [stat(eth(treasury, 4), "store treasury (buys unsold Statements)")]),
     stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
@@ -594,12 +633,14 @@ function updateDepositHint() {
   if (S.viewOnly) return ($("deposit-hint").textContent = "View-only: you can look, not deposit. Connect this wallet to act.");
   if (!S.approved) return ($("deposit-hint").textContent = "Approve the pool once, then pick Credits to deposit.");
   if (!n) return ($("deposit-hint").textContent = "Pick Credits to deposit (rarest shown first). Every Credit counts as one slot, whatever its rarity. You can withdraw until the batch fills.");
-  const txs = Math.ceil(Number(n) / MAX_PER_TX);
-  if (txs > 1) return ($("deposit-hint").textContent = `${n} Credits → ${txs} transactions of up to ${MAX_PER_TX} (gas limit). ${feeUsd()} per Credit, ${feeUsd(n)} total.`);
+  const txs = chunkSizes(Number(n)).length;
+  const fee = `Fee: ${feeUsd(depositUsd(n))} (${Number(n) >= BULK_MIN ? `bulk rate, ${feeUsd(1)}` : feeUsd(2)} per Credit). Earns ${2n * n} SCREDIT.`;
+  const nudge = Number(n) < BULK_MIN ? ` Tip: ${BULK_MIN}+ Credits at once cost ${feeUsd(1)} each.` : "";
+  if (txs > 1) return ($("deposit-hint").textContent = `${n} Credits → ${txs} transactions (gas limit). ${fee}`);
   const room = PER - S.openFilled;
-  $("deposit-hint").textContent = n <= room
-    ? `Goes into batch #${S.openBatch} (${S.openFilled + n}/80 after). Fee: ${feeUsd()} per Credit, ${feeUsd(n)} total.`
-    : `Fills batch #${S.openBatch} with ${room}, the other ${n - room} spill into the next batch${n - room > PER ? "es" : ""}. Fee: ${feeUsd(n)} (${feeUsd()} per Credit).`;
+  $("deposit-hint").textContent = (n <= room
+    ? `Goes into batch #${S.openBatch} (${S.openFilled + n}/80 after). `
+    : `Fills batch #${S.openBatch} with ${room}, the other ${n - room} spill into the next batch${n - room > PER ? "es" : ""}. `) + fee + nudge;
 }
 
 $("select-all").onclick = () => {
@@ -614,19 +655,22 @@ $("select-all").onclick = () => {
 };
 $("approve").onclick = () => send("Approve", "setApprovalForAll", [S.pool, true], undefined, S.credits, CREDITS_ABI);
 $("deposit").onclick = async () => {
-  const fee = await readFresh("depositFee").catch(() => null);
-  if (fee == null) return toast("Price oracle is stale, try again shortly", true);
+  const usdW = await readFresh("usdWei").catch(() => null);
+  if (usdW == null) return toast("Price oracle is stale, try again shortly", true);
   const ids = [...S.selected];
-  const txs = Math.ceil(ids.length / MAX_PER_TX);
-  // Snapshot what the user is about to confirm. The live poll can update S.* while the dialog is
-  // open; the first transaction must be pinned to THIS state, not whatever is current later.
-  const shownBatch = S.openBatch, shownFilled = S.openFilled;
+  const sizes = chunkSizes(ids.length), txs = sizes.length;
+  const totalWei = sizes.reduce((t, c) => t + usdW * BigInt(c * perCredit(c)), 0n);
+  // Snapshot what the user is about to confirm, read fresh from the chain (the stats may not have
+  // loaded yet, or may be a poll behind). The first transaction is pinned to THIS state.
+  const shownBatch = await readFresh("openBatchId");
+  const shownFilled = (await readFresh("batchInfo", [shownBatch]))[1];
   const room = PER - shownFilled;
   const ok = await confirmStep(`Deposit ${ids.length} Credit${ids.length > 1 ? "s" : ""}?`, [
     ids.length <= room
       ? `They go into batch #${shownBatch}, taking it to ${shownFilled + BigInt(ids.length)}/80.`
       : `${room} fill batch #${shownBatch}; the rest start the next batch.`,
-    `Fee: ${feeUsd()} per Credit, so ${feeUsd(ids.length)} total (≈ ${ethFee(fee * BigInt(ids.length))})${txs > 1 ? `, across ${txs} transactions` : ""}. Not refunded if you withdraw.`,
+    `Fee: ${feeUsd(depositUsd(ids.length))} total (≈ ${ethFee(totalWei)})${txs > 1 ? `, across ${txs} transactions` : ""}: ${feeRule()}. Not refunded if you withdraw.`,
+    `You earn ${2 * ids.length} SCREDIT (store points; they can't be transferred).`,
     "You can withdraw them any time until their batch reaches 80. After that they're locked in.",
   ], "Deposit");
   if (!ok) return;
@@ -635,12 +679,12 @@ $("deposit").onclick = async () => {
   S.selected.clear();
   // Split big deposits under the per-tx gas cap. Each tx pays its own fee.
   const chunks = [];
-  for (let i = 0; i < ids.length; i += MAX_PER_TX) chunks.push(ids.slice(i, i + MAX_PER_TX));
+  for (let i = 0, k = 0; k < sizes.length; i += sizes[k++]) chunks.push(ids.slice(i, i + sizes[k]));
   for (const [i, chunk] of chunks.entries()) {
     const label = chunks.length > 1 ? `Deposit ${i + 1}/${chunks.length} (${chunk.length})` : `Deposit ${chunk.length}`;
     // Pin the batch we showed the user: if someone deposits first, the tx reverts instead of
     // landing somewhere unexpected. 5% fee buffer against price moves; the pool refunds the excess.
-    const due = fee * BigInt(chunk.length); // fee per Credit
+    const due = usdW * BigInt(chunk.length * perCredit(chunk.length)); // = depositFeeFor(chunk.length)
     if (!(await send(label, "depositAt", [chunk, ...expect], due + due / 20n))) break;
     const openNow = await readFresh("openBatchId");
     expect = [openNow, (await readFresh("batchInfo", [openNow]))[1]];
@@ -791,7 +835,7 @@ async function batchCard(b, mineOnly = false) {
   if (state === "Settled") {
     bids = await bidHistory(b);
     row("Sold for", ethUsd(highBid));
-    row("Split among depositors", `${eth(proceeds)} (after the 1% fee)`);
+    row("Split among depositors", `${eth(proceeds)} (no sale fee)`);
     if (me && slots) row("You get", `${ethUsd((proceeds * slots) / PER)}${claimed ? " · collected" : ""}`);
   }
 
@@ -866,8 +910,8 @@ async function batchCard(b, mineOnly = false) {
       const step = (highBid * 500n) / 10000n;
       let min = highBidder === "0x0000000000000000000000000000000000000000" ? auctionReserve : highBid + (step === 0n ? 1n : step);
       if (min === 0n) min = 1n;
-      // What winning really costs a depositor: the bid minus their slots/80 share of it after the 1% fee.
-      const netCost = (v) => v - ((v - v / 100n) * slots) / PER;
+      // What winning really costs a depositor: the bid minus their slots/80 share of it (no sale fee).
+      const netCost = (v) => v - (v * slots) / PER;
       const i = input("Bid (ETH)", formatEther(min));
       actions.append(el("div", { class: "row" }, i, btn("Bid", () => {
         const v = toWei(i.value);
@@ -1051,6 +1095,7 @@ async function galleryTile(b, state) {
   const sid = info[3];
   const [, highBid, , endsAt] = auction;
   const owner = await tryRead("ownerOf", [sid], S.statements, STATEMENTS_ABI);
+  S.owners.set(sid, owner); S.sidBatch.set(sid, b); // the store section reuses these
   const sig = JSON.stringify([state, info, auction, reserve, owner, state === "Auction" && now() < endsAt, S.account],
     (_, v) => (typeof v === "bigint" ? v.toString() : v));
   const cached = S.tiles.get(b);
@@ -1064,6 +1109,7 @@ async function galleryTile(b, state) {
     : "Taken by its sole holder";
   const who = !owner ? "—"
     : owner.toLowerCase() === S.pool.toLowerCase() ? "Held by the pool for its depositors"
+    : S.store && owner.toLowerCase() === S.store.toLowerCase() ? "In the store (bid with SCREDIT)"
     : S.account && owner.toLowerCase() === S.account.toLowerCase() ? "Owned by you"
     : `Owned by ${short(owner)}`;
   const tile = el("button", {
@@ -1078,6 +1124,81 @@ async function galleryTile(b, state) {
   );
   S.tiles.set(b, { sig, el: tile });
   return tile;
+}
+
+// ───────────────────────── store: SCREDIT-only auctions ─────────────────────────
+// Statements the treasury bought (only ones whose pool auction ended with no bids) are auctioned
+// here for SCREDIT points. Each bid also pays a $0.25 platform fee in ETH.
+async function renderStore() {
+  if (!S.store) return;
+  $("store-section").hidden = false;
+  const [treasury, fee, mine] = await Promise.all([
+    read("treasuryBalance", [], S.store, STORE_ABI), tryRead("bidFee", [], S.store, STORE_ABI),
+    S.account ? read("balanceOf", [S.account], S.store, STORE_ABI) : null,
+  ]);
+  S.points = mine ?? 0n;
+  $("points").hidden = mine == null;
+  $("points").textContent = `${mine ?? 0n} SCREDIT`;
+  $("store-meta").textContent = `Treasury ${eth(treasury, 4)} · bid fee ${feeUsd(0.25)}${fee ? ` (≈ ${ethFee(fee)})` : ""}${mine != null ? ` · you have ${mine} SCREDIT` : ""}`;
+
+  // Everything ever listed (Listed events, scanned incrementally) plus anything the store holds now.
+  S.storeScan ??= { from: S.dep.deployBlock || 0n, sids: new Set() };
+  const to = await S.pub.getBlockNumber();
+  if (to >= S.storeScan.from) {
+    const logs = await S.pub.getLogs({
+      address: S.store, event: STORE_ABI.find((x) => x.type === "event" && x.name === "Listed"),
+      fromBlock: S.storeScan.from, toBlock: to,
+    }).catch(() => null);
+    if (logs) { for (const l of logs) S.storeScan.sids.add(l.args.statementId); S.storeScan.from = to + 1n; }
+  }
+  const store = S.store.toLowerCase();
+  for (const [sid, o] of S.owners) if (o && o.toLowerCase() === store) S.storeScan.sids.add(sid);
+
+  const cards = (await Promise.all([...S.storeScan.sids].map((sid) => storeCard(sid, fee)))).filter(Boolean);
+  $("store").replaceChildren(...(cards.length ? cards
+    : [el("p", { class: "muted" }, "Nothing in the store yet. The treasury only buys Statements whose auction ended with no bids, at the depositors' own minimum.")]));
+}
+
+async function storeCard(sid, fee) {
+  const [[highBidder, highBid, reserve, endsAt], owner] = await Promise.all([
+    read("listings", [sid], S.store, STORE_ABI), tryRead("ownerOf", [sid], S.statements, STATEMENTS_ABI),
+  ]);
+  const inStore = owner && owner.toLowerCase() === S.store.toLowerCase();
+  if (!endsAt && !inStore) return null; // sold and delivered: it shows in the gallery as owned
+  const b = S.sidBatch.get(sid);
+  const art = b != null ? mosaicGrid(b, "Settled") : el("span", { class: "muted" }, `#${sid}`);
+  const noBids = highBidder === "0x0000000000000000000000000000000000000000";
+  const live = endsAt && now() < endsAt;
+  const card = el("div", { class: "stile store-card" },
+    el("span", { class: "stile-art" }, art),
+    el("span", { class: "stile-top" }, el("b", {}, `Statement #${sid}`),
+      el("span", { class: `tag ${live ? "Auction" : "Assembled"}` }, live ? "Store auction" : endsAt ? "Ended" : "In the treasury")),
+    el("span", { class: "stile-line" }, !endsAt ? "Not listed yet"
+      : noBids ? `No bids yet · min ${reserve || 1n} SCREDIT` : `High bid ${highBid} SCREDIT · ${short(highBidder)}`),
+    live ? el("span", { class: "muted small" }, "Ends in ", el("span", { "data-ends": String(endsAt) }, dur(endsAt - now()))) : null,
+  );
+  const canAct = S.account && !S.viewOnly;
+  if (live && canAct) {
+    const min = await readFresh("minBid", [sid], S.store, STORE_ABI);
+    const i = el("input", { type: "number", min: String(min), step: "1", value: String(min), "aria-label": "Bid in SCREDIT" });
+    card.append(el("div", { class: "row" }, i, el("button", { "data-tip": "storeBid", onclick: async () => {
+      const pts = /^\d+$/.test(i.value) ? BigInt(i.value) : null;
+      if (pts == null || pts < min) return toast(`Minimum bid is ${min} SCREDIT`, true);
+      if (pts > S.points) return toast(`You have ${S.points} SCREDIT`, true);
+      const ok = await confirmStep(`Bid ${pts} SCREDIT on Statement #${sid}?`, [
+        `Your ${pts} SCREDIT are held while you lead. If someone outbids you, they come straight back.`,
+        `Each bid costs a ${feeUsd(0.25)} platform fee in ETH${fee ? ` (≈ ${ethFee(fee)})` : ""}, win or lose.`,
+        "If you win, your SCREDIT are spent and the Statement goes to your wallet when the auction is settled.",
+      ], "Bid");
+      if (!ok) return;
+      const f = await readFresh("bidFee", [], S.store, STORE_ABI);
+      await send(`Store bid #${sid}`, "bid", [sid, pts], f + f / 20n, S.store, STORE_ABI); // 5% buffer, excess refunded
+    } }, `Bid (+${feeUsd(0.25)})`)));
+  }
+  if (endsAt && !live) {
+    card.append(el("button", { "data-tip": "storeSettle", onclick: () => send(`Settle store #${sid}`, "settle", [sid], undefined, S.store, STORE_ABI) }, "Settle"));
+  }
+  return card;
 }
 
 function mosaicButton(b, sid, state) {

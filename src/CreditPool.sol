@@ -9,6 +9,11 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IStatementAssembler} from "./IStatementAssembler.sol";
 import {AssemblyVault} from "./AssemblyVault.sol";
 
+/// @notice The store: SCREDIT points, the treasury, and the SCREDIT-only store auction.
+interface ICreditStore {
+    function award(address to, uint256 points) external;
+}
+
 /// @notice Chainlink price feed (ETH/USD, 8 decimals on mainnet).
 interface AggregatorV3Interface {
     function decimals() external view returns (uint8);
@@ -22,13 +27,18 @@ interface AggregatorV3Interface {
 /// @notice Holders deposit Credits (not ETH) into sequential 80-slot batches. A full batch is
 ///         burned into one Statement. The Statement is either redeemed by a sole owner of all
 ///         80 slots or sold by on-chain English auction, with proceeds split pro-rata by slots.
-///         Platform revenue: $1 (in ETH) per Credit deposited, plus a fixed 1%
-///         of every auction sale. Redeeming a Statement outright is not a sale and pays nothing.
+///         Deposit fee: $2 (in ETH) per Credit, or $1 per Credit when depositing 6 or more at
+///         once. 25% of it goes to the platform and 75% to the store's treasury. Every Credit
+///         deposited earns 2 SCREDIT points. Auction sales carry no fee: depositors get 100%.
 contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     // ───────────────────────── constants ─────────────────────────
     uint256 public constant CREDITS_PER_STATEMENT = 80;
-    uint256 public constant DEPOSIT_FEE_USD = 1e8;          // $1.00 per Credit, at 8 decimals
-    uint256 public constant SALE_FEE_BPS = 100;             // 1% of each auction sale; constant, can't be raised
+    uint256 public constant USD = 1e8;                      // $1.00 at 8 decimals
+    uint256 public constant FEE_USD_PER_CREDIT = 2;         // $2 per Credit...
+    uint256 public constant BULK_FEE_USD_PER_CREDIT = 1;    // ...or $1 per Credit for a deposit of
+    uint256 public constant BULK_MIN_CREDITS = 6;           // at least this many in one transaction
+    uint256 public constant PLATFORM_SHARE_BPS = 2500;      // 25% of deposit fees; 75% to the treasury
+    uint256 public constant POINTS_PER_CREDIT = 2;          // SCREDIT awarded per Credit deposited
     // Chainlink ETH/USD heartbeat is 1h, so a 1h limit bricks deposits at every heartbeat edge.
     // The fee is $1; a day-old price is off by cents. This only guards against a dead feed.
     uint256 public constant ORACLE_MAX_AGE = 1 days;
@@ -53,6 +63,8 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     uint256 public immutable fallbackFeeWei;
     /// @notice The only address ever approved to the assembler; holds one batch for one call.
     AssemblyVault public immutable vault;
+    /// @notice Receives SCREDIT awards and the treasury's share of fees.
+    ICreditStore public immutable store;
 
     // ───────────────────────── state ─────────────────────────
     enum BatchState { Filling, Full, Assembled, Auction, Settled, Redeemed, Dissolved }
@@ -62,7 +74,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         uint64 fullAt;
         uint64 assembledAt;
         uint256 statementId;
-        uint256 proceeds;      // sale price net of the 1% sale fee
+        uint256 proceeds;      // sale price (no sale fee)
         uint256[] creditIds;   // live list while Filling (swap-and-pop on withdraw)
         address[] depositors;  // unique depositors (swap-and-pop when slots hit 0)
     }
@@ -93,6 +105,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     mapping(uint256 => CreditInfo) internal _credit;
     mapping(uint256 => bool) public statementAssigned;                      // statementId => already backs a batch
     mapping(address => uint256) public pendingReturns;                      // outbid refunds
+    mapping(uint256 => uint256) public unsoldAuctions;                      // batch => auctions that ended with no bids
 
 
     // ───────────────────────── events ─────────────────────────
@@ -108,7 +121,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     event Claimed(uint256 indexed batchId, address indexed who, uint256 amount);
     event Dissolved(uint256 indexed batchId);
     event RefundWithdrawn(address indexed who, uint256 amount);
-    event FeesSwept(address indexed to, uint256 amount);
+    event FeesSwept(address indexed to, uint256 amount, address indexed treasury, uint256 treasuryAmount);
     event FeeRecipientSet(address indexed recipient);
 
     error WrongBatchState();
@@ -135,10 +148,12 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         address assembler_,
         address ethUsdFeed_,
         uint256 assemblyOpensAt_,
-        address feeRecipient_
+        address feeRecipient_,
+        address store_
     ) Ownable(msg.sender) {
         // Dependencies must be contracts (external audit #1, L-04); Deploy.s.sol checks more.
-        if (credits_.code.length == 0 || statements_.code.length == 0 || assembler_.code.length == 0 || ethUsdFeed_.code.length == 0) {
+        if (credits_.code.length == 0 || statements_.code.length == 0 || assembler_.code.length == 0 || ethUsdFeed_.code.length == 0
+                || store_.code.length == 0) {
             revert NotAContract();
         }
         credits = IERC721(credits_);
@@ -153,18 +168,24 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         if (feeRecipient_ == address(0)) revert ZeroAddress();
         feeRecipient = feeRecipient_;
         vault = new AssemblyVault(credits, statements, assembler);
+        store = ICreditStore(store_);
     }
 
     // ───────────────────────── fee ─────────────────────────
 
-    /// @notice Current fee per Credit ($1) in wei. A deposit of n Credits pays n × this.
-    ///         Frontends should send a small buffer; excess is refunded.
-    function depositFee() public view returns (uint256) {
+    /// @notice $1 in wei at the current price (fallbackFeeWei if the feed can't be trusted).
+    function usdWei() public view returns (uint256) {
         uint256 live = _liveFee();
         return live == 0 ? fallbackFeeWei : live;
     }
 
-    /// @notice True while the price feed can't be trusted and deposits use `fallbackFeeWei`.
+    /// @notice Total fee in wei for depositing n Credits in one transaction: $2 each, or $1 each
+    ///         for 6 or more. Frontends should send a small buffer; excess is refunded.
+    function depositFeeFor(uint256 n) public view returns (uint256) {
+        return usdWei() * n * (n >= BULK_MIN_CREDITS ? BULK_FEE_USD_PER_CREDIT : FEE_USD_PER_CREDIT);
+    }
+
+    /// @notice True while the price feed can't be trusted and fees use `fallbackFeeWei` per $1.
     function feeUsesFallback() external view returns (bool) {
         return _liveFee() == 0;
     }
@@ -175,8 +196,8 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     function _liveFee() internal view returns (uint256) {
         try ethUsdFeed.latestRoundData() returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
             if (price <= 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > ORACLE_MAX_AGE) return 0;
-            // fee = $1 / (ETH/USD)  →  wei
-            return (DEPOSIT_FEE_USD * 10 ** _feedDecimals * 1e18) / (uint256(price) * 1e8);
+            // $1 / (ETH/USD)  →  wei
+            return (USD * 10 ** _feedDecimals * 1e18) / (uint256(price) * 1e8);
         } catch {
             return 0;
         }
@@ -185,7 +206,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     // ───────────────────────── deposit / withdraw ─────────────────────────
 
     /// @notice Deposit Credits. Caller must setApprovalForAll(pool). Credits overflow into
-    ///         the next batch automatically. Fee: $1 per Credit (depositFee() × count).
+    ///         the next batch automatically. Fee: depositFeeFor(count).
     function deposit(uint256[] calldata creditIds) external payable nonReentrant {
         _deposit(creditIds);
     }
@@ -204,7 +225,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
 
     function _deposit(uint256[] calldata creditIds) internal {
         require(creditIds.length > 0, "empty");
-        uint256 fee = depositFee() * creditIds.length;
+        uint256 fee = depositFeeFor(creditIds.length);
         if (msg.value < fee) revert InsufficientFee();
         accruedFees += fee;
 
@@ -232,6 +253,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
             }
         }
 
+        store.award(msg.sender, creditIds.length * POINTS_PER_CREDIT); // trusted, set at deploy
         if (msg.value > fee) _send(msg.sender, msg.value - fee);
     }
 
@@ -449,13 +471,12 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         if (a.highBidder == address(0)) {
             batch.state = BatchState.Assembled;
             delete auctions[b];
+            unsoldAuctions[b] += 1; // lets the store's treasury step in as buyer of last resort
             emit Settled(b, address(0), 0);
             return;
         }
         batch.state = BatchState.Settled;
-        uint256 saleFee = (a.highBid * SALE_FEE_BPS) / 10_000;
-        accruedFees += saleFee;
-        batch.proceeds = a.highBid - saleFee;
+        batch.proceeds = a.highBid; // no sale fee: depositors get it all
         statements.transferFrom(address(this), a.highBidder, batch.statementId);
         emit Settled(b, a.highBidder, a.highBid);
     }
@@ -493,11 +514,14 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         revert RenounceDisabled();
     }
 
+    /// @notice Split accrued deposit fees: 25% to the platform, 75% to the store's treasury.
     function sweepFees() external nonReentrant {
         uint256 amt = accruedFees;
         accruedFees = 0;
-        _send(feeRecipient, amt);
-        emit FeesSwept(feeRecipient, amt);
+        uint256 platform = (amt * PLATFORM_SHARE_BPS) / 10_000;
+        _send(feeRecipient, platform);
+        _send(address(store), amt - platform);
+        emit FeesSwept(feeRecipient, platform, address(store), amt - platform);
     }
 
     // ───────────────────────── views ─────────────────────────

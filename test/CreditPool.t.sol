@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {CreditPool} from "../src/CreditPool.sol";
+import {deployPool} from "./DeployPool.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 
 contract CreditPoolTest is Test {
@@ -18,7 +19,7 @@ contract CreditPoolTest is Test {
         stmts = new MockStatements(credits);
         feed = new MockFeed(2500e8); // $2,500 ETH
         opensAt = block.timestamp + 8 days;
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), opensAt, treasury);
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), opensAt, treasury);
         for (uint256 i; i < 6; ++i) {
             address u = [alice, bob, carol, whale, bidder1, bidder2][i];
             vm.deal(u, 100 ether);
@@ -32,7 +33,7 @@ contract CreditPoolTest is Test {
     }
     function _deposit(address who, uint256 n) internal returns (uint256[] memory ids) {
         ids = _give(who, n);
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(who); pool.deposit{value: fee}(ids);
     }
     function _fillBatch0() internal {
@@ -40,16 +41,17 @@ contract CreditPoolTest is Test {
     }
 
     function test_FeeIsOneDollar() public view {
-        assertEq(pool.depositFee(), 0.0004 ether); // $1 / $2500
+        assertEq(pool.usdWei(), 0.0004 ether); // $1 / $2500
     }
 
     function test_ExcessFeeRefunded_FeesSwept() public {
         uint256[] memory ids = _give(alice, 3);
         uint256 before = alice.balance;
         vm.prank(alice); pool.deposit{value: 1 ether}(ids);
-        assertEq(before - alice.balance, 0.0012 ether); // $1 per Credit × 3
+        assertEq(before - alice.balance, 0.0024 ether); // $2 per Credit × 3 (under the 6-Credit bulk rate)
         pool.sweepFees();
-        assertEq(treasury.balance, 0.0012 ether);
+        assertEq(treasury.balance, 0.0006 ether);                 // 25% to the platform
+        assertEq(address(pool.store()).balance, 0.0018 ether);    // 75% to the store's treasury
     }
 
     function test_RevertUnderpaidFee() public {
@@ -59,11 +61,11 @@ contract CreditPoolTest is Test {
     }
 
     function test_StaleOracleUsesFallbackFee() public {
-        uint256 live = pool.depositFee();
+        uint256 live = pool.usdWei();
         assertEq(pool.fallbackFeeWei(), live);              // frozen at deploy: $1 at the deploy price
         feed.set(5000e8, block.timestamp - 2 days);         // stale, even though the price changed
         assertTrue(pool.feeUsesFallback());
-        assertEq(pool.depositFee(), live);                  // fallback, not the stale price
+        assertEq(pool.usdWei(), live);                  // fallback, not the stale price
     }
 
     function test_OverflowIntoNextBatch() public {
@@ -156,11 +158,11 @@ contract CreditPoolTest is Test {
         vm.prank(alice); pool.claim(0);
         vm.prank(bob); pool.claim(0);
         vm.prank(carol); pool.claim(0);
-        // 3 ETH sale, 1% fee → 2.97 ETH split 40/30/10
-        assertEq(alice.balance - a0, 1.485 ether);
-        assertEq(bob.balance - b0, 1.11375 ether);
-        assertEq(carol.balance - c0, 0.37125 ether);
-        assertEq(pool.accruedFees(), 80 * pool.depositFee() + 0.03 ether); // $1 × 80 Credits + 1% of 3 ETH
+        // 3 ETH sale, no sale fee → all 3 ETH split 40/30/10
+        assertEq(alice.balance - a0, 1.5 ether);
+        assertEq(bob.balance - b0, 1.125 ether);
+        assertEq(carol.balance - c0, 0.375 ether);
+        assertEq(pool.accruedFees(), pool.usdWei() * 80); // deposits of 40, 30, 10: all bulk rate ($1)
         pool.sweepFees();
         assertEq(address(pool).balance, 0); // everything paid out: refunds, shares, fees
         vm.prank(alice); vm.expectRevert(CreditPool.NothingToClaim.selector);

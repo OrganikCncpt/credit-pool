@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {CreditPool} from "../../src/CreditPool.sol";
+import {deployPool} from "../DeployPool.sol";
 import {MockCredits, MockStatements, MockFeed} from "../Mocks.sol";
 
 /*
@@ -103,7 +104,7 @@ contract EthCustodyUnitTest is Test {
         stmts = new MockStatements(credits);
         stmts.setCap(type(uint256).max);
         feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, treasury);
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, treasury);
         address[6] memory us = [alice, bob, carol, b1, b2, eve];
         for (uint256 i; i < 6; ++i) {
             vm.deal(us[i], 100 ether);
@@ -117,7 +118,7 @@ contract EthCustodyUnitTest is Test {
     }
     function _deposit(address who, uint256 n) internal returns (uint256[] memory ids) {
         ids = _give(who, n);
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(who); pool.deposit{value: fee}(ids);
     }
     /// alice 40 / bob 30 / carol 10 → assembled, reserve voted 1 ether, auction started.
@@ -187,7 +188,7 @@ contract EthCustodyUnitTest is Test {
         vm.warp(block.timestamp + 1 days);
         pool.settle(b);
         (,,,, uint256 proceeds,) = pool.batchInfo(b);
-        assertEq(proceeds, 8 ether - 0.08 ether);
+        assertEq(proceeds, 8 ether); // no sale fee
         uint256 a0 = alice.balance;
         vm.prank(alice); pool.claim(b);
         assertEq(alice.balance - a0, proceeds * 40 / 80);
@@ -241,7 +242,7 @@ contract EthCustodyUnitTest is Test {
         assertEq(stmts.ownerOf(1), b2);
         assertEq(eve.balance, 100 ether);
         vm.expectRevert(CreditPool.WrongBatchState.selector); pool.settle(b);
-        assertEq(pool.accruedFees() - 80 * pool.depositFee(), 1.05 ether / 100); // $1 × 80 Credits
+        assertEq(pool.accruedFees(), pool.usdWei() * 80); // deposit fees only: sales carry no fee
         vm.prank(b1); pool.withdrawRefund();
         assertEq(b1.balance, 100 ether);
     }
@@ -364,7 +365,7 @@ contract EthCustodyUnitTest is Test {
         uint256 b = pool.openBatchId();
         Reenterer r = new Reenterer(pool, credits);
         vm.deal(address(r), 10 ether);
-        r.doDeposit(_give(address(r), 40), 40 * pool.depositFee());
+        r.doDeposit(_give(address(r), 40), 40 * pool.usdWei());
         _deposit(bob, 40);
         pool.assemble(b);
         r.doSetReserve(b, 1 ether); vm.prank(bob); pool.setReserve(b, 1 ether);
@@ -376,7 +377,7 @@ contract EthCustodyUnitTest is Test {
         r.setMode(Reenterer.Mode.Claim, b);
         r.doClaim(b);
         _assertGuarded(r);
-        assertEq(address(r).balance - before, (4 ether - 0.04 ether) / 2);
+        assertEq(address(r).balance - before, 4 ether / 2);
         // and a second top-level claim fails
         r.setMode(Reenterer.Mode.None, 0);
         vm.expectRevert(CreditPool.NothingToClaim.selector); r.doClaim(b);
@@ -399,8 +400,8 @@ contract EthCustodyUnitTest is Test {
         r.setMode(Reenterer.Mode.Withdraw, 0);
         r.doDeposit(_give(address(r), 1), 1 ether);
         _assertGuarded(r);
-        // exact refund: spent only 3 deposit fees (3 single-Credit deposits)
-        assertEq(address(r).balance, 10 ether - 3 * pool.depositFee());
+        // exact refund: spent only 3 deposit fees (3 single-Credit deposits at $2)
+        assertEq(address(r).balance, 10 ether - 3 * pool.depositFeeFor(1));
     }
 
     /// startAuction / setReserve used to be unguarded; both are nonReentrant now. Show re-entering them from a _send
@@ -411,7 +412,7 @@ contract EthCustodyUnitTest is Test {
         uint256 b1_ = pool.openBatchId();
         Reenterer r = new Reenterer(pool, credits);
         vm.deal(address(r), 10 ether);
-        r.doDeposit(_give(address(r), 41), 41 * pool.depositFee());
+        r.doDeposit(_give(address(r), 41), 41 * pool.usdWei());
         _deposit(carol, 39);
         pool.assemble(b1_);
         r.doSetReserve(b1_, 3 ether);
@@ -483,18 +484,20 @@ contract EthCustodyUnitTest is Test {
         who[0] = alice; who[1] = bob; who[2] = carol; who[3] = b1; who[4] = b2;
         uint256 fees = pool.accruedFees();
         vm.prank(eve); pool.sweepFees();
-        assertEq(treasury.balance, fees);
+        assertEq(treasury.balance, fees / 4);                                  // 25% platform
+        assertEq(address(pool.store()).balance, fees - fees / 4);              // 75% store treasury
         vm.prank(eve); pool.sweepFees();         // second sweep sends 0
-        assertEq(treasury.balance, fees);
+        assertEq(treasury.balance, fees / 4);
         assertEq(address(pool).balance, _obligations(pool.openBatchId(), who));
-        assertGe(address(pool).balance, 3 ether - 0.03 ether + 2 ether + 1 ether);
+        assertGe(address(pool).balance, 3 ether + 2 ether + 1 ether);
     }
 
     // ── FINDING (low): feeRecipient == address(0) at construction; anyone can sweep fees into 0x0 ──
     // FIXED (audit N5 / custody finding): a zero fee recipient can no longer be deployed.
     function test_Fixed_ZeroFeeRecipientRejected() public {
+        address st = address(pool.store()); // read first: a call here would consume expectRevert
         vm.expectRevert(CreditPool.ZeroAddress.selector);
-        new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(0));
+        new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(0), st);
         vm.expectRevert(CreditPool.ZeroAddress.selector);
         pool.setFeeRecipient(address(0));
     }
@@ -541,14 +544,14 @@ contract EthCustodyUnitTest is Test {
     // ── deposit excess refund is exact; insufficient fee reverts; fee under extreme prices ──
     function test_Attack_DepositFeeAndRefund() public {
         uint256[] memory ids = _give(alice, 3);
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(alice); vm.expectRevert(CreditPool.InsufficientFee.selector); pool.deposit{value: fee - 1}(ids);
         vm.prank(alice); pool.deposit{value: 5 ether}(ids);
         assertEq(alice.balance, 100 ether - fee);
         assertEq(address(pool).balance, fee);
         assertEq(pool.accruedFees(), fee);
         feed.set(type(int128).max, 0);                 // absurd price → fee rounds to 0, still no ETH mismatch
-        uint256 f0 = pool.depositFee();
+        uint256 f0 = pool.depositFeeFor(1);
         uint256[] memory bobIds = _give(bob, 1);
         vm.prank(bob); pool.deposit{value: 1 ether}(bobIds);
         assertEq(bob.balance, 100 ether - f0);
@@ -641,7 +644,7 @@ contract EthHandler is Test {
         extra = bound(extra, 0, 1 ether);
         uint256[] memory ids = new uint256[](n);
         for (uint256 i; i < n; ++i) { credits.mint(u, nextId); ids[i] = nextId++; }
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         uint256 before = u.balance;
         if (u == address(re)) { _randReMode(seed); re.doDeposit(ids, fee + extra); }
         else { vm.prank(u); pool.deposit{value: fee + extra}(ids); }
@@ -749,9 +752,8 @@ contract EthHandler is Test {
         if (hb != address(0)) {
             (,,, uint256 sid, uint256 proceeds,) = pool.batchInfo(b);
             assertEq(stmts.ownerOf(sid), hb, "statement to wrong party");
-            uint256 fee = hbid / 100;
-            assertEq(proceeds, hbid - fee);
-            gFees += fee; gLiveBidSum -= hbid; gLiveBid[b] = 0;
+            assertEq(proceeds, hbid, "no sale fee: depositors get the whole price");
+            gLiveBidSum -= hbid; gLiveBid[b] = 0;
             uint256 distributed;
             for (uint256 i; i < 4; ++i) {
                 uint256 sh = proceeds * pool.slots(b, actors[i]) / 80;
@@ -832,8 +834,10 @@ contract EthHandler is Test {
 
     function sweepFees() external {
         uint256 before = treasury.balance;
+        uint256 storeBefore = address(pool.store()).balance;
         vm.prank(eve); pool.sweepFees();
-        assertEq(treasury.balance - before, gFees);
+        assertEq(treasury.balance - before, gFees * 2500 / 10_000, "platform gets 25%");
+        assertEq(address(pool.store()).balance - storeBefore, gFees - gFees * 2500 / 10_000, "store gets 75%");
         gOut += gFees; gSwept += gFees; gFees = 0;
     }
 
@@ -855,7 +859,7 @@ contract EthCustodyInvariantTest is Test {
         stmts = new MockStatements(credits);
         stmts.setCap(type(uint256).max);
         feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, treasury);
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, treasury);
         h = new EthHandler(pool, credits, feed, stmts, treasury);
         bytes4[] memory sel = new bytes4[](13);
         sel[0] = EthHandler.deposit.selector;       sel[1] = EthHandler.assemble.selector;
@@ -906,7 +910,8 @@ contract EthCustodyInvariantTest is Test {
         assertEq(address(pool).balance, h.gIn() - h.gOut(), "conservation");
         assertEq(address(pool).balance, obligations + h.gDust(), "dust accounting");
         assertLe(h.gDust(), 80 * h.nSettledSale());
-        assertEq(h.treasury().balance, h.gSwept());
+        // Every swept wei landed at the platform (25%) or the store's treasury (75%), nowhere else.
+        assertEq(h.treasury().balance + address(h.pool().store()).balance, h.gSwept(), "swept fees accounted");
 
         // 4. per-actor: no one ends with more than paid-in + entitled
         for (uint256 i; i < n; ++i) {

@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {CreditPool} from "../../src/CreditPool.sol";
+import {deployPool} from "../DeployPool.sol";
 import {MockCredits, MockStatements, MockFeed} from "../Mocks.sol";
 import {Credits} from "../../external/credits/Credits.sol";
 
@@ -177,7 +178,7 @@ contract NftCustodyTest is Test {
         stmts = new MockStatements(credits);
         stmts.setCap(type(uint256).max);
         feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
         _approveAll(pool);
     }
 
@@ -195,12 +196,12 @@ contract NftCustodyTest is Test {
     }
     function _depositTo(CreditPool p, address who, uint256 n) internal returns (uint256[] memory ids) {
         ids = _give(who, n);
-        uint256 fee = p.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = p.depositFeeFor(ids.length);
         vm.prank(who); p.deposit{value: fee}(ids);
     }
     function _deposit(address who, uint256 n) internal returns (uint256[] memory ids) { return _depositTo(pool, who, n); }
     function _redeposit(address who, uint256[] memory ids) internal {
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(who); pool.deposit{value: fee}(ids);
     }
     function _one(uint256 id) internal pure returns (uint256[] memory a) { a = new uint256[](1); a[0] = id; }
@@ -316,7 +317,7 @@ contract NftCustodyTest is Test {
 
     function test_Steal_DepositVictimCredit_UsingApprovals() public {
         uint256[] memory ids = _give(alice, 2); // alice approved the pool in setUp
-        uint256 fee = pool.depositFee() * 1; // $1 per Credit, one Credit
+        uint256 fee = pool.depositFeeFor(1);
         vm.prank(eve); vm.expectRevert(); pool.deposit{value: fee}(_one(ids[0]));
         // even with a per-token approval and approval-for-all to eve, from == msg.sender blocks it
         vm.prank(alice); credits.approve(eve, ids[0]);
@@ -454,7 +455,7 @@ contract NftCustodyTest is Test {
     }
 
     function test_EarlyDissolve_AssemblyNotOpenYetExtendsLock() public {
-        CreditPool p = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp + 30 days, address(this));
+        CreditPool p = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp + 30 days, address(this));
         _approveAll(p);
         uint256[] memory a = _depositTo(p, alice, 80);
         vm.warp(vm.getBlockTimestamp() + 15 days);
@@ -532,7 +533,7 @@ contract NftCustodyTest is Test {
 
     function test_Statement_PlainMintHonestWorks() public {
         PlainMintStatements ps = new PlainMintStatements(credits);
-        CreditPool p = new CreditPool(address(credits), address(ps), address(ps), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(ps), address(ps), address(feed), block.timestamp, address(this));
         _approveAll(p);
         _depositTo(p, alice, 80);
         p.assemble(0);
@@ -550,7 +551,7 @@ contract NftCustodyTest is Test {
     // another batch. statementAssigned makes assemble revert instead of double-assigning.
     function test_Fixed_PlainMintWrongReturnId_Rejected() public {
         PlainMintStatements ps = new PlainMintStatements(credits);
-        CreditPool p = new CreditPool(address(credits), address(ps), address(ps), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(ps), address(ps), address(feed), block.timestamp, address(this));
         _approveAll(p);
         _depositTo(p, alice, 40); _depositTo(p, bob, 40); // batch 0
         _depositTo(p, whale, 80);                         // batch 1
@@ -575,7 +576,7 @@ contract NftCustodyTest is Test {
 
     function test_Safe_AssemblerApprovalRevokedAfterSuccessAndRevert() public {
         ThiefStatements ts = new ThiefStatements(credits, eve);
-        CreditPool p = new CreditPool(address(credits), address(ts), address(ts), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(ts), address(ts), address(feed), block.timestamp, address(this));
         _approveAll(p);
         _depositTo(p, alice, 80);
         uint256[] memory c = _depositTo(p, carol, 10);
@@ -586,7 +587,7 @@ contract NftCustodyTest is Test {
         // A reverting assemble rolls the approval back too.
         MockStatements capped = new MockStatements(credits);
         capped.setCap(0);
-        CreditPool p2 = new CreditPool(address(credits), address(capped), address(capped), address(feed), block.timestamp, address(this));
+        CreditPool p2 = deployPool(address(credits), address(capped), address(capped), address(feed), block.timestamp, address(this));
         _approveAll(p2);
         _depositTo(p2, bob, 80);
         vm.expectRevert(bytes("cap")); p2.assemble(0);
@@ -602,7 +603,7 @@ contract NftCustodyTest is Test {
     // holds" finds nothing else to take; assembly completes correctly.
     function test_Fixed_AssemblerSeesOnlyTheBatch() public {
         ThiefStatements ts = new ThiefStatements(credits, eve);
-        CreditPool p = new CreditPool(address(credits), address(ts), address(ts), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(ts), address(ts), address(feed), block.timestamp, address(this));
         _approveAll(p);
         _depositTo(p, alice, 80);                       // batch 0
         _depositTo(p, bob, 80);                         // batch 1 (Full, other batch)
@@ -619,7 +620,7 @@ contract NftCustodyTest is Test {
     // A thief aiming at the POOL directly is refused: the pool never approves anyone.
     function test_Fixed_AssemblerCannotReachPool() public {
         PoolThiefStatements pt = new PoolThiefStatements(credits, eve);
-        CreditPool p = new CreditPool(address(credits), address(pt), address(pt), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(pt), address(pt), address(feed), block.timestamp, address(this));
         pt.setPool(address(p));
         _approveAll(p);
         _depositTo(p, alice, 80);
@@ -634,7 +635,7 @@ contract NftCustodyTest is Test {
     // Audit N-1: burn the 80, push a cheap Credit back in so the numbers add up. Caught.
     function test_Fixed_SwapInCaught() public {
         SwapInStatements sw = new SwapInStatements(credits);
-        CreditPool p = new CreditPool(address(credits), address(sw), address(sw), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(sw), address(sw), address(feed), block.timestamp, address(this));
         _approveAll(p);
         uint256[] memory a = _depositTo(p, alice, 80);
         uint256[] memory cheap = _give(address(sw), 1);
@@ -652,7 +653,7 @@ contract NftCustodyTest is Test {
     // used to hit another batch. Via the vault, the last 80 the caller holds ARE this batch.
     function test_Fixed_AssemblerCannotBurnWrongIds() public {
         WrongIdsStatements ws = new WrongIdsStatements(credits);
-        CreditPool p = new CreditPool(address(credits), address(ws), address(ws), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(credits), address(ws), address(ws), address(feed), block.timestamp, address(this));
         _approveAll(p);
         uint256[] memory a = _depositTo(p, alice, 80); // batch 0
         uint256[] memory c = _depositTo(p, carol, 30); // batch 1 Filling
@@ -672,7 +673,7 @@ contract NftCustodyTest is Test {
             address(new OtherSigStatements(credits))
         ];
         for (uint256 k; k < 3; ++k) {
-            CreditPool p = new CreditPool(address(credits), asms[k], asms[k], address(feed), block.timestamp, address(this));
+            CreditPool p = deployPool(address(credits), asms[k], asms[k], address(feed), block.timestamp, address(this));
             _approveAll(p);
             uint256[] memory a = _depositTo(p, alice, 50);
             uint256[] memory b = _depositTo(p, bob, 30);
@@ -729,7 +730,7 @@ contract NftCustodyTest is Test {
         for (uint256 i; i < 80; ++i) first80[i] = x[i];
         uint256[] memory last10 = new uint256[](10);
         for (uint256 i; i < 10; ++i) last10[i] = x[80 + i];
-        uint256 fee = pool.depositFee() * first80.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(first80.length);
         h.deposit{value: fee}(first80);
         h.deposit{value: fee}(last10);
         uint256[] memory aliceIds = _deposit(alice, 5); // victim in same Filling batch
@@ -783,11 +784,11 @@ contract NftCustodyTest is Test {
     function test_Integration_RealCreditsBurnPath() public {
         Credits rc = _realCredits(alice, 90);
         RealCreditsStatements rs = new RealCreditsStatements(rc);
-        CreditPool p = new CreditPool(address(rc), address(rs), address(rs), address(feed), block.timestamp, address(this));
+        CreditPool p = deployPool(address(rc), address(rs), address(rs), address(feed), block.timestamp, address(this));
         vm.prank(alice); rc.setApprovalForAll(address(p), true);
         uint256[] memory ids = new uint256[](80);
         for (uint256 i; i < 80; ++i) ids[i] = i + 1;
-        uint256 fee = p.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = p.depositFeeFor(ids.length);
         vm.prank(alice); p.deposit{value: fee}(ids);
         uint256[] memory extra = new uint256[](10);
         for (uint256 i; i < 10; ++i) extra[i] = 81 + i;
@@ -881,7 +882,7 @@ contract CustodyHandler is Test {
             ids = new uint256[](n);
             for (uint256 i; i < n; ++i) { credits.mint(u, nextId); ids[i] = nextId++; }
         }
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(u); pool.deposit{value: fee}(ids);
         for (uint256 i; i < n; ++i) _add(ids[i], u);
     }
@@ -999,7 +1000,7 @@ contract CustodyHandler is Test {
         if (held.length == 0) return;
         uint256[] memory ids = new uint256[](1); ids[0] = held[seed % held.length];
         address a = users[(who % 4 + 1) % 4];
-        uint256 fee = pool.depositFee() * ids.length; // $1 per Credit
+        uint256 fee = pool.depositFeeFor(ids.length);
         vm.prank(eve);
         try pool.deposit{value: fee}(ids) { _flag("eve deposited victim's credit"); } catch {}
         vm.prank(a);
@@ -1067,7 +1068,7 @@ contract NftCustodyInvariantTest is Test {
         stmts = new MockStatements(credits);
         stmts.setCap(type(uint256).max);
         MockFeed feed = new MockFeed(2500e8);
-        pool = new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
+        pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, address(this));
         h = new CustodyHandler(pool, credits, stmts);
         targetContract(address(h));
     }

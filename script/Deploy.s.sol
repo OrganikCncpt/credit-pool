@@ -2,12 +2,13 @@
 pragma solidity ^0.8.24;
 import {Script, console} from "forge-std/Script.sol";
 import {CreditPool, AggregatorV3Interface} from "../src/CreditPool.sol";
+import {CreditStore} from "../src/CreditStore.sol";
 
 /// Mainnet deploy. Run once the Statements contract is live.
 ///   STATEMENTS=0x... ASSEMBLER=0x... FEE_RECIPIENT=0x... \
 ///   forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC --account deployer --broadcast --verify
 ///   OWNER=0x... (required; a multisig). Ownership is two-step: after deploy, OWNER must call
-///   acceptOwnership() on the pool before it becomes owner.
+///   acceptOwnership() on the pool AND on the store before it becomes owner of each.
 /// Optional: CREDITS, ETH_USD_FEED (default mainnet), ASSEMBLY_OPENS_AT (default now).
 contract Deploy is Script {
     address constant CREDITS = 0x97630aA70AB14ed9883B41dAfccBc11349723043;
@@ -40,8 +41,13 @@ contract Deploy is Script {
         require(owner != address(0), "OWNER is zero");
 
         vm.startBroadcast();
-        pool = new CreditPool(credits, statements, assembler, feed, opensAt, feeRecipient);
-        if (owner != msg.sender) pool.transferOwnership(owner); // pending until OWNER calls acceptOwnership()
+        CreditStore store = new CreditStore();
+        pool = new CreditPool(credits, statements, assembler, feed, opensAt, feeRecipient, address(store));
+        store.setPool(address(pool)); // one-time link; the store can't be pointed anywhere else later
+        if (owner != msg.sender) {
+            pool.transferOwnership(owner);  // pending until OWNER calls acceptOwnership()
+            store.transferOwnership(owner); // same for the store
+        }
         vm.stopBroadcast();
 
         console.log("CreditPool:", address(pool));
@@ -49,6 +55,8 @@ contract Deploy is Script {
         console.log("owner:", pool.owner());
         console.log("pending owner (must acceptOwnership):", pool.pendingOwner());
         console.log("assembly vault:", address(pool.vault()));
-        console.log("fallback fee per Credit (wei, frozen at deploy):", pool.fallbackFeeWei());
+        console.log("CreditStore:", address(store));
+        require(address(store.pool()) == address(pool) && address(pool.store()) == address(store), "store not linked");
+        console.log("fallback $1 in wei (frozen at deploy):", pool.fallbackFeeWei());
     }
 }
