@@ -102,7 +102,8 @@ print("  settled #0–9; depositors of #0–4 collected, #5–9 left to collect 
 print("store: sweep fees (25% platform / 75% treasury), treasury buys #10–12 at the depositors' minimum")
 send(B[0], POOL, "sweepFees()")
 print(f"  treasury {eth(call(STORE, 'treasuryBalance()'))}")
-for n in range(10, 13): send(OWNER, STORE, "buyUnsold(uint256)", n)
+for n in range(10, 13):  # price limit = the majority minimum the owner sees now
+    send(OWNER, STORE, "buyUnsold(uint256,uint256)", n, call(POOL, "currentReserve(uint256)", n))
 skip()
 sids = []
 for n in range(10, 13):

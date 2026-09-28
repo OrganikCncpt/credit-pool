@@ -13,13 +13,12 @@ contract DeployFork is Script {
         ICredits credits = ICredits(0x97630aA70AB14ed9883B41dAfccBc11349723043);
         vm.startBroadcast();
         ForkStatements stmts = new ForkStatements(credits);
-        CreditStore store = new CreditStore();
+        CreditStore store = new CreditStore(1 ether);
         CreditPool pool = new CreditPool(
             address(credits), address(stmts), address(stmts),
             0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419, block.timestamp, msg.sender, address(store)
         );
         store.setPool(address(pool));
-        store.setMaxTreasuryBid(1 ether);
         vm.stopBroadcast();
         console.log("statements:", address(stmts));
         console.log("pool:", address(pool));

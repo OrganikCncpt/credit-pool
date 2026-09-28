@@ -19,10 +19,10 @@ Fees (all constants; in ETH via Chainlink ETH/USD):
 - Auction sales carry **no fee**: depositors split 100% of the price.
 
 The store (`src/CreditStore.sol`):
-- **SCREDIT** ("Store Credit"): 2 non-transferable points per Credit deposited (`transfer`/`approve` revert).
-- **Treasury** (75% of deposit fees): spent only by `buyUnsold(batch)`, owner-triggered, and only for a batch
-  whose pool auction already ended with no bids. It opens a new auction with a bid at exactly the depositors'
-  own minimum, capped by `maxTreasuryBid`; anyone can outbid it for 24h. No function sends treasury ETH anywhere else.
+- **SCREDIT** ("Store Credit"): 2 non-transferable points per Credit, awarded when its batch fills (`transfer`/`approve` revert).
+- **Treasury** (75% of deposit fees): spent only by `buyUnsold(batch, maxAmount)`, owner-triggered, and only for a batch
+  that already had an auction end with no bids. It places the first bid at exactly the majority-voted minimum, with the
+  owner's price limit and the per-purchase `maxTreasuryBid` (raises take 3 days); anyone can outbid it for 24h.
 - **Store auction**: Statements the treasury holds are auctioned for SCREDIT only (24h, +5%, 15-min anti-snipe).
   Every bid pays a $0.25 platform fee in ETH (`sweepBidFees` → `feeRecipient`). Outbid points come straight
   back; the winner's points are burned.
@@ -36,6 +36,7 @@ The store (`src/CreditStore.sol`):
 
 ## Security review (self-audit, not a substitute for a real one)
 Attack tests: `test/Attacks.t.sol`. Invariant fuzzing: `test/Invariant.t.sol`.
+Store and fee-change review (2026-09-28): `docs/STORE-AUDIT.md` (CP-29..39, AR-11..17).
 
 | Finding | Status |
 |---|---|

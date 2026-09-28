@@ -23,7 +23,7 @@ contract DeployLocal is Script {
         MockCredits credits = new MockCredits();
         MockStatements stmts = new MockStatements(credits);
         MockFeed feed = new MockFeed(2500e8);
-        CreditStore store = new CreditStore();
+        CreditStore store = new CreditStore(1 ether);
         CreditPool pool = new CreditPool(
             address(credits), address(stmts), address(stmts), address(feed), block.timestamp, users[0], address(store)
         );

@@ -86,10 +86,9 @@ contract DeployTestnet is Script {
 
         if (feeScale > 1) feed = address(new ScaledFeed(AggregatorV3Interface(feed), int256(feeScale)));
         ForkStatements stmts = new ForkStatements(ICredits(address(credits)));
-        CreditStore store = new CreditStore();
+        CreditStore store = new CreditStore(vm.envOr("MAX_TREASURY_BID", uint256(0.01 ether)));
         CreditPool pool = new CreditPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient, address(store));
         store.setPool(address(pool));
-        store.setMaxTreasuryBid(vm.envOr("MAX_TREASURY_BID", uint256(0.01 ether)));
         if (fund > 0) {
             for (uint256 i; i < testers.length; ++i) {
                 if (testers[i] == deployer) continue;

@@ -8,7 +8,7 @@ import {CreditStore} from "../src/CreditStore.sol";
 function deployPool(address credits, address statements, address assembler, address feed, uint256 opensAt, address feeRecipient)
     returns (CreditPool pool)
 {
-    CreditStore store = new CreditStore();
+    CreditStore store = new CreditStore(5 ether); // treasury cap per purchase
     pool = new CreditPool(credits, statements, assembler, feed, opensAt, feeRecipient, address(store));
     store.setPool(address(pool));
 }

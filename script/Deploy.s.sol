@@ -41,7 +41,7 @@ contract Deploy is Script {
         require(owner != address(0), "OWNER is zero");
 
         vm.startBroadcast();
-        CreditStore store = new CreditStore();
+        CreditStore store = new CreditStore(0); // treasury can't buy until OWNER raises the cap (3-day delay)
         pool = new CreditPool(credits, statements, assembler, feed, opensAt, feeRecipient, address(store));
         store.setPool(address(pool)); // one-time link; the store can't be pointed anywhere else later
         if (owner != msg.sender) {

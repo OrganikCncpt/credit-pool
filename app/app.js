@@ -108,7 +108,7 @@ const TIPS = {
   approve: "Step 1 of 2: approve the pool, then deposit. " +
     "It's a one-time permission, and the pool only ever moves Credits you deposit yourself. You can revoke it any time.",
   selectAll: "Select every Credit in this wallet. Click a Credit to toggle it.",
-  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. Each Credit earns 2 SCREDIT. " +
+  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. Each Credit earns 2 SCREDIT once its batch fills. " +
     "You can withdraw any time until the batch reaches 80.",
   depositNeedsApproval: "Approve the pool first (one time), then pick Credits.",
   depositNeedsPick: "Click the Credits you want to deposit first.",
@@ -133,7 +133,7 @@ const TIPS = {
   sweep: "Splits collected deposit fees: 25% to the platform, 75% to the store treasury (which only buys Statements that failed to sell). Anyone can trigger it; it can only go there.",
   storeBid: "Bid SCREDIT points, plus a {bidfee} platform fee in ETH per bid. Your points are held while you lead; if you're outbid they come straight back. If you win, they're spent.",
   storeSettle: "Ends this store auction: the Statement goes to the winner and their points are spent. Anyone can press this.",
-  points: "Store Credit: 2 points for every Credit you deposit. They can't be sent, sold or traded; you can only bid them on Statements in the store.",
+  points: "Store Credit: 2 points for every Credit you have in a batch when it fills (withdrawing before then earns none). They can't be sent, sold or traded; you can only bid them on Statements in the store.",
 };
 
 const tipEl = () => document.getElementById("tip");
@@ -185,7 +185,7 @@ const eth = (wei, dp = 4) => {
   return `${i}${t ? "." + t : ""} ETH`;
 };
 // Fees can be tiny (a testnet cent is ~0.0000037 ETH): keep two significant digits.
-const ethFee = (wei) => eth(wei, Math.max(5, 20 - wei.toString().length));
+const ethFee = (wei) => eth(wei, Math.min(18, Math.max(5, 20 - wei.toString().length)));
 // Number inputs → wei, or null for anything that isn't a plain non-negative amount.
 const toWei = (v) => {
   v = String(v).trim();
@@ -207,7 +207,7 @@ const chunkSizes = (n) => {
   return Array.from({ length: k }, (_, i) => base + (i < n % k ? 1 : 0));
 };
 const depositUsd = (n) => chunkSizes(Number(n)).reduce((t, c) => t + c * perCredit(c), 0); // in pool dollars
-// ≈ USD for an ETH amount. depositFee() is exactly FEE_USD in wei (Chainlink ETH/USD), so $ = wei ÷ fee × FEE_USD.
+// ≈ USD for an ETH amount. usdWei() is exactly FEE_USD in wei (Chainlink ETH/USD), so $ = wei ÷ fee × FEE_USD.
 const usd = (wei) => {
   if (!S.fee || S.feeFallback || wei == null) return ""; // the fallback fee isn't exact
   const d = (Number(wei) / Number(S.fee)) * FEE_USD(); // S.fee = usdWei(): exactly $1 of pool pricing
@@ -445,6 +445,10 @@ async function send(label, functionName, args = [], value, address = S.pool, abi
     const r = await S.pub.waitForTransactionReceipt({ hash });
     if (r.status !== "success") throw new Error("transaction reverted");
     toast(`${label}: done`);
+    // The transaction is final: free the lock before redrawing, or a click on the next step
+    // (Approve → Deposit) during the redraw is refused although nothing is pending.
+    S.sending = false;
+    document.body.classList.remove("sending");
     await refresh();
     return true;
   } catch (e) {
@@ -634,7 +638,7 @@ function updateDepositHint() {
   if (!S.approved) return ($("deposit-hint").textContent = "Approve the pool once, then pick Credits to deposit.");
   if (!n) return ($("deposit-hint").textContent = "Pick Credits to deposit (rarest shown first). Every Credit counts as one slot, whatever its rarity. You can withdraw until the batch fills.");
   const txs = chunkSizes(Number(n)).length;
-  const fee = `Fee: ${feeUsd(depositUsd(n))} (${Number(n) >= BULK_MIN ? `bulk rate, ${feeUsd(1)}` : feeUsd(2)} per Credit). Earns ${2n * n} SCREDIT.`;
+  const fee = `Fee: ${feeUsd(depositUsd(n))} (${Number(n) >= BULK_MIN ? `bulk rate, ${feeUsd(1)}` : feeUsd(2)} per Credit). Earns ${2n * n} SCREDIT when the batch fills.`;
   const nudge = Number(n) < BULK_MIN ? ` Tip: ${BULK_MIN}+ Credits at once cost ${feeUsd(1)} each.` : "";
   if (txs > 1) return ($("deposit-hint").textContent = `${n} Credits → ${txs} transactions (gas limit). ${fee}`);
   const room = PER - S.openFilled;
@@ -670,7 +674,7 @@ $("deposit").onclick = async () => {
       ? `They go into batch #${shownBatch}, taking it to ${shownFilled + BigInt(ids.length)}/80.`
       : `${room} fill batch #${shownBatch}; the rest start the next batch.`,
     `Fee: ${feeUsd(depositUsd(ids.length))} total (≈ ${ethFee(totalWei)})${txs > 1 ? `, across ${txs} transactions` : ""}: ${feeRule()}. Not refunded if you withdraw.`,
-    `You earn ${2 * ids.length} SCREDIT (store points; they can't be transferred).`,
+    `You earn ${2 * ids.length} SCREDIT when their batch fills (store points; they can't be transferred). Withdraw before then and you earn none.`,
     "You can withdraw them any time until their batch reaches 80. After that they're locked in.",
   ], "Deposit");
   if (!ok) return;
@@ -1156,7 +1160,7 @@ async function renderStore() {
 
   const cards = (await Promise.all([...S.storeScan.sids].map((sid) => storeCard(sid, fee)))).filter(Boolean);
   $("store").replaceChildren(...(cards.length ? cards
-    : [el("p", { class: "muted" }, "Nothing in the store yet. The treasury only buys Statements whose auction ended with no bids, at the depositors' own minimum.")]));
+    : [el("p", { class: "muted" }, "Nothing in the store yet. The treasury only buys Statements whose auction ended with no bids, at the minimum the depositors' majority voted.")]));
 }
 
 async function storeCard(sid, fee) {
@@ -1184,7 +1188,10 @@ async function storeCard(sid, fee) {
     card.append(el("div", { class: "row" }, i, el("button", { "data-tip": "storeBid", onclick: async () => {
       const pts = /^\d+$/.test(i.value) ? BigInt(i.value) : null;
       if (pts == null || pts < min) return toast(`Minimum bid is ${min} SCREDIT`, true);
-      if (pts > S.points) return toast(`You have ${S.points} SCREDIT`, true);
+      // A leader's held points come back before the new bid is taken, so they count toward a raise.
+      const leading = S.account && highBidder.toLowerCase() === S.account.toLowerCase();
+      const usable = S.points + (leading ? highBid : 0n);
+      if (pts > usable) return toast(`You have ${usable} SCREDIT to bid with`, true);
       const ok = await confirmStep(`Bid ${pts} SCREDIT on Statement #${sid}?`, [
         `Your ${pts} SCREDIT are held while you lead. If someone outbids you, they come straight back.`,
         `Each bid costs a ${feeUsd(0.25)} platform fee in ETH${fee ? ` (≈ ${ethFee(fee)})` : ""}, win or lose.`,

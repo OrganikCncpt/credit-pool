@@ -23,7 +23,6 @@ contract CreditStoreTest is Test {
         feed = new MockFeed(2500e8);
         pool = deployPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, platform);
         store = CreditStore(payable(address(pool.store())));
-        store.setMaxTreasuryBid(5 ether);
         address[4] memory us = [alice, bob, carol, eve];
         for (uint256 i; i < 4; ++i) {
             vm.deal(us[i], 1000 ether);
@@ -59,10 +58,14 @@ contract CreditStoreTest is Test {
         _fundTreasury();
         uint256 b;
         (b, sid) = _unsold(reserve);
-        store.buyUnsold(b);
+        store.buyUnsold(b, reserve);
         vm.warp(block.timestamp + 25 hours);
         pool.settle(b);
         assertEq(stmts.ownerOf(sid), address(store));
+    }
+    function _fillOpen(address who) internal {
+        (, uint256 filled,,,,) = pool.batchInfo(pool.openBatchId());
+        _deposit(who, 80 - filled);
     }
     function _fundTreasury() internal {
         _deposit(carol, 5); // $10 of fees
@@ -71,42 +74,88 @@ contract CreditStoreTest is Test {
 
     // ───────────────────────── points ─────────────────────────
 
-    function test_PointsAreTwoPerCredit() public {
-        _deposit(alice, 1); assertEq(store.balanceOf(alice), 2);
-        _deposit(alice, 2); assertEq(store.balanceOf(alice), 2 + 4);
-        _deposit(bob, 5);   assertEq(store.balanceOf(bob), 10);
-        _deposit(carol, 6); assertEq(store.balanceOf(carol), 12); // bulk fee doesn't change points
-        assertEq(store.totalSupply(), 28);
+    // Points arrive when the batch fills: 2 per Credit each depositor has in it.
+    function test_PointsAreTwoPerCreditWhenBatchFills() public {
+        _deposit(alice, 1); _deposit(alice, 2); _deposit(bob, 5);
+        assertEq(store.totalSupply(), 0);               // nothing yet: the batch is still filling
+        _deposit(carol, 72);                            // fills it: 3 + 5 + 72 = 80
+        assertEq(store.balanceOf(alice), 6);
+        assertEq(store.balanceOf(bob), 10);
+        assertEq(store.balanceOf(carol), 144);
+        assertEq(store.totalSupply(), 160);
+        _deposit(alice, 30);                            // next batch: not full, no points yet
+        assertEq(store.balanceOf(alice), 6);
     }
 
-    function test_PointsKeptAfterWithdraw_ButFeeIsTheirCost() public {
-        _deposit(alice, 3);
-        uint256[] memory ids = new uint256[](3);
-        ids[0] = 1; ids[1] = 2; ids[2] = 3;
-        vm.prank(alice); pool.withdraw(ids);
-        assertEq(store.balanceOf(alice), 6); // earned by paying the $2 fee, which isn't refunded
+    // Worst case for the award loop: 80 different depositors, the last deposit fills the batch.
+    function test_FillAwardGas_80Depositors() public {
+        for (uint256 i; i < 79; ++i) {
+            address u = address(uint160(0x10000 + i));
+            vm.deal(u, 1 ether);
+            vm.prank(u); credits.setApprovalForAll(address(pool), true);
+            _deposit(u, 1);
+        }
+        vm.deal(address(0x20000), 1 ether);
+        vm.prank(address(0x20000)); credits.setApprovalForAll(address(pool), true);
+        uint256[] memory one = new uint256[](1);
+        credits.mint(address(0x20000), nextId); one[0] = nextId++;
+        uint256 fee = pool.depositFeeFor(1);
+        vm.prank(address(0x20000));
+        uint256 g = gasleft();
+        pool.deposit{value: fee}(one);
+        uint256 used = g - gasleft();
+        emit log_named_uint("filling deposit with 80 depositors, gas", used);
+        assertLt(used, 3_000_000);
+        assertEq(store.totalSupply(), 160);
+        assertEq(store.balanceOf(address(0x20000)), 2);
+    }
+
+    // Audit fix: deposit → withdraw loops used to mint points for $0.50 each with nothing pooled.
+    function test_DepositWithdrawLoopEarnsNoPoints() public {
+        for (uint256 k; k < 5; ++k) {
+            _deposit(eve, 6);
+            uint256[] memory ids = new uint256[](6);
+            for (uint256 i; i < 6; ++i) ids[i] = nextId - 6 + i;
+            vm.prank(eve); pool.withdraw(ids);
+        }
+        assertEq(store.balanceOf(eve), 0);
+        assertEq(store.totalSupply(), 0);
     }
 
     function test_PointsCannotMove() public {
-        _deposit(alice, 5);
+        _deposit(alice, 40); _deposit(bob, 40);
         vm.startPrank(alice);
         vm.expectRevert(CreditStore.NonTransferable.selector); store.transfer(bob, 1);
         vm.expectRevert(CreditStore.NonTransferable.selector); store.approve(bob, 1);
         vm.expectRevert(CreditStore.NonTransferable.selector); store.transferFrom(alice, bob, 1);
         vm.stopPrank();
         assertEq(store.allowance(alice, bob), 0);
-        assertEq(store.balanceOf(alice), 10);
+        assertEq(store.balanceOf(alice), 80);
     }
 
     function test_OnlyPoolAwards() public {
+        address[] memory to = new address[](1); to[0] = eve;
+        uint256[] memory pts = new uint256[](1); pts[0] = 1_000_000;
         vm.prank(eve); vm.expectRevert(CreditStore.NotPool.selector);
-        store.award(eve, 1_000_000);
+        store.award(to, pts);
+    }
+
+    // Audit fix: the store refuses to link to a pool that doesn't point back at it.
+    function test_StoreRefusesWrongPool() public {
+        CreditStore fresh = new CreditStore(0);
+        vm.expectRevert(CreditStore.WrongPool.selector);
+        fresh.setPool(address(pool)); // pool.store() is the original store
+    }
+
+    function test_FeeRecipientCantBeTheStore() public {
+        vm.expectRevert(CreditPool.ZeroAddress.selector);
+        pool.setFeeRecipient(address(store));
     }
 
     function test_PoolLinkIsOneTime() public {
         vm.expectRevert(CreditStore.PoolAlreadySet.selector);
         store.setPool(address(0xBEEF));
-        CreditStore fresh = new CreditStore();
+        CreditStore fresh = new CreditStore(0);
         vm.prank(eve); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, eve));
         fresh.setPool(address(pool));
     }
@@ -146,16 +195,16 @@ contract CreditStoreTest is Test {
         _fundTreasury();
         (uint256 b,) = _assembledBatch(0.001 ether);
         vm.expectRevert(CreditStore.NotUnsold.selector);
-        store.buyUnsold(b);
-        pool.startAuction(b); // a live first auction: still off limits
+        store.buyUnsold(b, 1 ether);
+        pool.startAuction(b); // a live FIRST auction (never unsold): still off limits
         vm.expectRevert(CreditStore.NotUnsold.selector);
-        store.buyUnsold(b);
+        store.buyUnsold(b, 1 ether);
     }
 
     function test_TreasuryBuysUnsoldAtDepositorsMinimum() public {
         _fundTreasury();
         (uint256 b,) = _unsold(0.001 ether);
-        store.buyUnsold(b);
+        store.buyUnsold(b, 0.001 ether);
         (address hb, uint256 hbid, uint256 reserve,) = pool.auctions(b);
         assertEq(hb, address(store));
         assertEq(hbid, reserve);
@@ -166,28 +215,114 @@ contract CreditStoreTest is Test {
         _fundTreasury();
         (uint256 b,) = _unsold(0.001 ether);
         vm.prank(eve); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, eve));
-        store.buyUnsold(b);
+        store.buyUnsold(b, 1 ether);
+    }
+
+    // Audit fix (M-1): depositors raising their votes before the purchase lands can't make the
+    // treasury overpay; the owner's price limit reverts it.
+    function test_FrontRunRaisingReserveReverts() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        vm.prank(alice); pool.setReserve(b, 0.002 ether);   // front-run: both raise
+        vm.prank(bob); pool.setReserve(b, 0.002 ether);
+        vm.expectRevert(CreditStore.PriceMoved.selector);
+        store.buyUnsold(b, 0.001 ether);
+    }
+
+    // Audit fix (M-1): a live auction someone started at a higher minimum can't make it overpay.
+    function test_RestartedAuctionAtHigherMinimumReverts() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        vm.prank(alice); pool.setReserve(b, 0.002 ether);
+        vm.prank(bob); pool.setReserve(b, 0.002 ether);
+        pool.startAuction(b);
+        vm.expectRevert(CreditStore.PriceMoved.selector);
+        store.buyUnsold(b, 0.001 ether);
+    }
+
+    // Verify R1: restarting the auction first can't lock the treasury out; it opens the bidding
+    // in that no-bid auction at the same majority minimum.
+    function test_RestartedAuctionStillBuyable() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        vm.prank(eve); pool.startAuction(b);                 // griefer restarts it first
+        store.buyUnsold(b, 0.001 ether);
+        (address hb, uint256 hbid,,) = pool.auctions(b);
+        assertEq(hb, address(store)); assertEq(hbid, 0.001 ether);
+    }
+
+    // It never bids against a bidder, and never after a live auction ended.
+    function test_NeverCompetesWithABidder() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        pool.startAuction(b);
+        vm.prank(eve); pool.bid{value: 0.001 ether}(b);
+        vm.expectRevert(CreditStore.AlreadyBid.selector);
+        store.buyUnsold(b, 1 ether);
+    }
+
+    function test_ConstructorRejectsStoreAsFeeRecipient() public {
+        address st = address(store);
+        vm.expectRevert(CreditPool.ZeroAddress.selector);
+        new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, st, st);
+    }
+
+    // Audit fix (L-1): never at the 30-day lowest-single-vote fallback, only the majority minimum.
+    function test_NeverBuysAtThirtyDayLowestVote() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.002 ether);
+        vm.prank(bob); pool.setReserve(b, 0.001 ether);      // lowest single vote
+        vm.warp(block.timestamp + 31 days);                  // fallback now uses lowestVote
+        assertTrue(pool.noReserveOpen(b));
+        vm.expectRevert(CreditPool.ReserveChanged.selector); // majority minimum ≠ fallback minimum
+        store.buyUnsold(b, 1 ether);
+    }
+
+    function test_NoVotesNoPurchase() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        vm.prank(alice); pool.setReserve(b, 0);
+        vm.prank(bob); pool.setReserve(b, 0);
+        vm.expectRevert(CreditPool.ReserveQuorumNotMet.selector);
+        store.buyUnsold(b, 1 ether);
+    }
+
+    // Audit fix (M-2): raising the cap takes 3 days; lowering is immediate.
+    function test_CapRaiseIsDelayed() public {
+        assertEq(store.maxTreasuryBid(), 5 ether);
+        store.setMaxTreasuryBid(100 ether);
+        assertEq(store.maxTreasuryBid(), 5 ether);
+        vm.warp(block.timestamp + 3 days - 1);
+        assertEq(store.maxTreasuryBid(), 5 ether);
+        vm.warp(block.timestamp + 1);
+        assertEq(store.maxTreasuryBid(), 100 ether);
+        store.setMaxTreasuryBid(1 ether);                    // lowering: at once, cancels nothing pending
+        assertEq(store.maxTreasuryBid(), 1 ether);
+        store.setMaxTreasuryBid(2 ether);
+        store.setMaxTreasuryBid(0.5 ether);                  // lowering cancels a pending raise
+        vm.warp(block.timestamp + 4 days);
+        assertEq(store.maxTreasuryBid(), 0.5 ether);
     }
 
     function test_TreasuryCapAndBalanceHold() public {
         _fundTreasury(); // 0.003 ETH treasury
         (uint256 b,) = _unsold(0.01 ether);
         vm.expectRevert(CreditStore.OverCap.selector); // over the treasury balance
-        store.buyUnsold(b);
+        store.buyUnsold(b, 1 ether);
         store.setMaxTreasuryBid(0.0001 ether);
         (uint256 b2,) = _unsold(0.001 ether);
         vm.expectRevert(CreditStore.OverCap.selector); // over the cap
-        store.buyUnsold(b2);
+        store.buyUnsold(b2, 1 ether);
     }
 
     function test_TreasuryOnlyOpens_AnyoneCanOutbid_RefundComesBack() public {
         _fundTreasury();
         (uint256 b, uint256 sid) = _unsold(0.001 ether);
         uint256 t0 = store.treasuryBalance();
-        store.buyUnsold(b);
+        store.buyUnsold(b, 0.001 ether);
         assertEq(store.treasuryBalance(), t0 - 0.001 ether);
         vm.expectRevert(CreditStore.AlreadyBid.selector); // it never raises its own bid
-        store.buyUnsold(b);
+        store.buyUnsold(b, 1 ether);
         vm.prank(eve); pool.bid{value: 0.002 ether}(b);
         vm.warp(block.timestamp + 25 hours);
         pool.settle(b);
@@ -204,15 +339,16 @@ contract CreditStoreTest is Test {
         vm.prank(alice); pool.startAuction(b);
         vm.warp(block.timestamp + 25 hours);
         pool.settle(b); // unsold, but alice alone holds it
+        _fundTreasury(); // (goes into the next batch, not alice's)
         vm.expectRevert(CreditPool.NotDepositor.selector);
-        store.buyUnsold(b);
+        store.buyUnsold(b, 1 ether);
     }
 
     // ───────────────────────── store auction ─────────────────────────
 
     function test_StoreAuction_FullFlow() public {
         uint256 sid = _storeOwns(0.001 ether);
-        _deposit(alice, 10); _deposit(bob, 10); // +20 points each
+        // alice and bob hold 80 points each from the batch _storeOwns filled
         uint256 a0 = store.balanceOf(alice); uint256 b0 = store.balanceOf(bob);
         store.list(sid, 5);
         uint256 fee = store.bidFee();
@@ -313,7 +449,8 @@ contract CreditStoreTest is Test {
         vm.deal(address(r), 1 ether);
         credits.mint(address(r), 9_999);
         uint256[] memory ids = new uint256[](1); ids[0] = 9_999;
-        r.approveAndDeposit(pool, ids);                  // 2 points
+        r.approveAndDeposit(pool, ids);
+        _fillOpen(alice);                                // its batch fills → 2 points
         store.list(sid, 1);
         r.bid(1, 0.5 ether);                             // excess refund → tries to re-enter bid and settle
         assertTrue(r.attempted());
@@ -334,7 +471,8 @@ contract CreditStoreTest is Test {
         uint256 pb = bound(bidB, 1, nb * 2);
         vm.prank(bob); try store.bid{value: fee}(sid, pb) {} catch {}
         (, uint256 held,,) = store.listings(sid);
-        uint256 sum = store.balanceOf(alice) + store.balanceOf(bob) + store.balanceOf(carol) + held;
+        assertEq(store.balanceOf(address(store)), held);  // escrow lives in the store's own balance
+        uint256 sum = store.balanceOf(alice) + store.balanceOf(bob) + store.balanceOf(carol) + store.balanceOf(address(store));
         assertEq(store.totalSupply(), sum);
     }
 }

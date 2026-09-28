@@ -113,6 +113,22 @@ External audit #1 H-03 is accepted as AR-10 (owner decision).
 
 | CP-28 | A dead or stale price feed blocked all deposits (ext. M-01; was DI-1) | `fallbackFeeWei` frozen at deploy ($1 in ETH then) is used whenever the feed is untrusted; `depositFee()` never reverts; `feeUsesFallback()`; constructor requires a healthy feed |
 
+Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/STORE-AUDIT.md`):
+
+| ID | Finding | Fix |
+|---|---|---|
+| CP-29 | `buyUnsold` read the reserve at execution and could join a live auction: depositors (>40 slots, or anyone after 30 days) front-run to make the treasury pay up to the cap (M) | `buyUnsold(b, maxAmount)`: price = `currentReserve` (majority), `PriceMoved` above the owner's limit; opens via `startAuctionAt` (batch Assembled) or bids into a live no-bid auction only if it opened at that same minimum (`AlreadyBid` if anyone bid) |
+| CP-30 | Treasury could open at 1 wei via the 30-day lowest-vote fallback / no votes (L) | Same fix: `currentReserve` reverts without quorum; `startAuctionAt` reverts when the fallback minimum differs |
+| CP-31 | Owner could raise the cap instantly and self-deal the treasury (M, trust) | Raising `maxTreasuryBid` is delayed 3 days (lowering immediate, cancels a pending raise); initial cap in the constructor (0 on mainnet). Residual trust: AR-11 |
+| CP-32 | SCREDIT farmable via deposit→withdraw loops at $0.50/point with nothing pooled (L-M) | Points awarded only when a batch fills (`_awardPoints`), 2 × slots, one `store.award(address[],uint256[])` call |
+| CP-33 | `setPool` accepted a pool not pointing back, permanently bricking deposits/sweeps (L) | `setPool` requires `pool_.store() == address(this)` (`WrongPool`) |
+| CP-34 | `feeRecipient` could be set to the store, making `sweepBidFees` revert (I) | `setFeeRecipient` rejects the store |
+| CP-35 | Escrowed bid points had no events; Σ balances < totalSupply during bids (I) | Escrow moves points to `balanceOf[store]` with `Transfer` events; settle burns from the store |
+| CP-36 | UI: leader couldn't raise their own store bid (L) | Held points count toward the raise |
+| CP-37 | UI: a click on Deposit right after Approve was refused while the page redrew | Send lock released once the tx is final, before the redraw |
+| CP-38 | First CP-29 fix required state Assembled, so anyone could lock the treasury out by restarting the auction first (verify pass R1) | Also accepts a live auction with no bids opened at the majority minimum (`test_RestartedAuctionStillBuyable`) |
+| CP-39 | Constructor accepted the store as `feeRecipient` (verify pass, fix 6 partial) | Constructor rejects it too |
+
 ## Accepted residuals (known, deliberate or out of our control)
 
 | ID | Residual | Why accepted |
@@ -127,6 +143,13 @@ External audit #1 H-03 is accepted as AR-10 (owner decision).
 | AR-8 | NFTs sent by plain `transferFrom` (not `safeTransferFrom`) are stuck | No admin rescue by design (immutable, ownerless custody) |
 | AR-9 | `settle` delivers the Statement with `transferFrom`, so a contract winner without ERC-721 support can't move it (audit #2 N-8) | Deliberate: `safeTransferFrom` would let a malicious winner revert and brick settlement for every depositor |
 | AR-10 | After 30 days unsold, the fallback minimum is the lowest vote cast, unweighted by slots, so one low vote sets the floor (ext. audit #1 H-03) | Owner decision: prevents a majority from blocking a sale forever (CP-4, CP-21). Everyone can outbid for 24h; the frontend warns depositors in the last 7 days before it applies |
+| AR-11 | The store owner chooses which unsold batches the treasury buys, up to `maxTreasuryBid` each; an owner who also controls a batch's majority can route treasury ETH to it | Trust assumption, documented. Bounded by the cap; raises take 3 days (CP-31); owner should be a multisig |
+| AR-12 | Deposit fee is non-monotonic at the bulk boundary (5 Credits = $10, 6 = $6) | Owner's pricing decision; the UI tips "6+ at once cost $1 each" |
+| AR-13 | A `feeRecipient` that rejects ETH blocks `sweepFees` (both shares) and `sweepBidFees` until the owner changes it | Owner-set, recoverable; no user funds involved (`accruedFees` is separate) |
+| AR-15 | A batch that fills, isn't assembled for 14 days, then dissolves keeps its points (same $0.50/point as honest depositors, Credits locked 14+ days) | Anyone can `assemble` once assembly is open; before that, points cost the same as honest ones |
+| AR-16 | After 30 days unsold, one low minority vote makes the fallback minimum differ from the majority minimum, so the treasury can't buy that batch | By design: the treasury only pays majority-voted prices |
+| AR-17 | If a listed Statement left the store by means outside the store's code, `settle` reverts and the winner's escrowed points stay locked | Depends on the real Statements contract (OK-list); revisit when published |
+| AR-14 | The deposit that fills a batch pays for awarding points to every depositor (≤ ~2.35M gas for 80 depositors) | Measured (`test_FillAwardGas_80Depositors`); a 100-Credit deposit stays ≈ 13.1M worst case, under 2^24 |
 
 ## Open, known, blocked on the Statements contract
 
