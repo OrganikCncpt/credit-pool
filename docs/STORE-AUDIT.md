@@ -26,6 +26,8 @@
 | CP-33 | Low | `setPool` accepted a pool that doesn't point back, permanently bricking deposits and sweeps. | 3 specialists | `setPool` requires `pool.store() == this`. | `test_StoreRefusesWrongPool` |
 | CP-38 | Low-Med | *Regression from the first CP-29 fix:* anyone could lock the treasury out by restarting the auction first. | verifier (R1) | Also bids into a live auction that has no bids and opened at the majority minimum. | `test_RestartedAuctionStillBuyable` |
 | CP-34, CP-39 | Info | `feeRecipient` could be the store (bid-fee sweep DoS). | access, verifier | Rejected in `setFeeRecipient` and in the constructor. | `test_FeeRecipientCantBeTheStore`, `test_ConstructorRejectsStoreAsFeeRecipient` |
+| CP-40 | Low | After 30 days, one low minority vote blocked all treasury purchases of that batch. | owner request (was AR-16) | The treasury opens the auction, possibly at the fallback minimum, but always bids the majority price, which is never lower. | `test_After30DaysPaysMajorityNotLowestVote`, `test_LiveAuctionAboveMajorityReverts` |
+| CP-41 | Low | A `feeRecipient` that rejects ETH paused sweeps, including the treasury's share. | owner request (was AR-13) | The treasury's 75% always goes out; the platform's 25% waits in `platformFeesOwed` and pays on the next sweep. | `test_Attack_RevertingTreasuryOnlyFreezesFees` |
 | CP-35 | Info | Escrowed bid points had no events; Σ balances < totalSupply during bids. | access | Escrow moves points to the store's own balance with `Transfer` events. | fuzz `testFuzz_PointsConserved` |
 | CP-36 | Low (UI) | The leader couldn't raise their own store bid. | frontend | Held points count toward the raise. | real-Chrome run |
 | CP-37 | Low (UI) | A click on Deposit right after Approve was refused while the page redrew. | found during UI re-test | The send lock is released once the tx is final. | real-Chrome run |
@@ -34,12 +36,10 @@
 
 - **AR-11: owner trust in the treasury.** The owner picks which unsold batches to buy, up to the cap each. It only ever pays a majority-voted minimum, only places the first bid, and cap raises are visible 3 days ahead. A multisig owner is expected.
 - **AR-12: non-monotonic fee at the bulk boundary.** 5 Credits cost $10 and 6 cost $6. This is the owner's pricing, and the UI suggests depositing 6+.
-- **AR-13: a reverting `feeRecipient` pauses both sweeps.** It is owner-set and recoverable; no user funds are involved.
 - **AR-14: the fill transaction pays for the points award.** Measured worst cases:
   - 2.35–2.72M gas for 80 depositors;
   - 11.8–13.1M gas for a 100-Credit deposit, under the 16.77M cap.
 - **AR-15: a batch that dissolves keeps its points.** The cost is the same as honest depositors pay, the Credits are locked for 14+ days, and anyone can `assemble`.
-- **AR-16: one low minority vote after 30 days blocks treasury purchases of that batch.** This follows from "only majority prices".
 - **AR-17: points can stay escrowed if a listed Statement leaves the store by external means.** This depends on the real Statements contract.
 
 ## Verified safe (highlights)
@@ -62,6 +62,6 @@
 
 ## Test gate after fixes
 
-- 145 local tests pass, including 30 store tests.
+- 146 local tests pass, including 31 store tests.
 - Fork tests with real Credits pass.
 - The full local rehearsal passed: 100 burners, the store flow, and real-Chrome UI checks.

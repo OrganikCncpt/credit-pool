@@ -128,6 +128,8 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | CP-37 | UI: a click on Deposit right after Approve was refused while the page redrew | Send lock released once the tx is final, before the redraw |
 | CP-38 | First CP-29 fix required state Assembled, so anyone could lock the treasury out by restarting the auction first (verify pass R1) | Also accepts a live auction with no bids opened at the majority minimum (`test_RestartedAuctionStillBuyable`) |
 | CP-39 | Constructor accepted the store as `feeRecipient` (verify pass, fix 6 partial) | Constructor rejects it too |
+| CP-40 | After 30 days one low minority vote blocked treasury purchases (was AR-16; owner asked to fix) | The store opens the auction (possibly at the fallback minimum) but always bids the majority price, which is never lower; a live auction above the majority minimum still reverts `PriceMoved` |
+| CP-41 | A `feeRecipient` rejecting ETH paused `sweepFees` for the treasury's share too (was AR-13; owner asked to fix) | Treasury's 75% always goes out; the platform's share is held in `platformFeesOwed` and paid on a later sweep (never re-split) |
 
 ## Accepted residuals (known, deliberate or out of our control)
 
@@ -145,9 +147,7 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | AR-10 | After 30 days unsold, the fallback minimum is the lowest vote cast, unweighted by slots, so one low vote sets the floor (ext. audit #1 H-03) | Owner decision: prevents a majority from blocking a sale forever (CP-4, CP-21). Everyone can outbid for 24h; the frontend warns depositors in the last 7 days before it applies |
 | AR-11 | The store owner chooses which unsold batches the treasury buys, up to `maxTreasuryBid` each; an owner who also controls a batch's majority can route treasury ETH to it | Trust assumption, documented. Bounded by the cap; raises take 3 days (CP-31); owner should be a multisig |
 | AR-12 | Deposit fee is non-monotonic at the bulk boundary (5 Credits = $10, 6 = $6) | Owner's pricing decision; the UI tips "6+ at once cost $1 each" |
-| AR-13 | A `feeRecipient` that rejects ETH blocks `sweepFees` (both shares) and `sweepBidFees` until the owner changes it | Owner-set, recoverable; no user funds involved (`accruedFees` is separate) |
 | AR-15 | A batch that fills, isn't assembled for 14 days, then dissolves keeps its points (same $0.50/point as honest depositors, Credits locked 14+ days) | Anyone can `assemble` once assembly is open; before that, points cost the same as honest ones |
-| AR-16 | After 30 days unsold, one low minority vote makes the fallback minimum differ from the majority minimum, so the treasury can't buy that batch | By design: the treasury only pays majority-voted prices |
 | AR-17 | If a listed Statement left the store by means outside the store's code, `settle` reverts and the winner's escrowed points stay locked | Depends on the real Statements contract (OK-list); revisit when published |
 | AR-14 | The deposit that fills a batch pays for awarding points to every depositor (≤ ~2.35M gas for 80 depositors) | Measured (`test_FillAwardGas_80Depositors`); a 100-Credit deposit stays ≈ 13.1M worst case, under 2^24 |
 

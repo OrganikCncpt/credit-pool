@@ -13,7 +13,7 @@ interface ICreditPool {
     function unsoldAuctions(uint256 b) external view returns (uint256);
     function store() external view returns (address);
     function currentReserve(uint256 b) external view returns (uint256);
-    function startAuctionAt(uint256 b, uint256 expectedReserve) external;
+    function startAuction(uint256 b) external;
     function auctions(uint256 b) external view returns (address highBidder, uint256 highBid, uint256 reserve, uint64 endsAt);
     function batchInfo(uint256 b)
         external
@@ -162,10 +162,12 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     }
 
     /// @notice Buyer of last resort, for a batch that has already had an auction end with no bids.
-    ///         Places the opening bid at exactly the depositors' MAJORITY-voted minimum (never the
-    ///         30-day lowest-vote fallback), either by opening a new auction (batch back to voting)
-    ///         or in a live auction that has no bids yet and opened at that same minimum (so a
-    ///         restarted auction can't lock the treasury out). It never bids against a bidder.
+    ///         Places the opening bid at exactly the depositors' MAJORITY-voted minimum, either by
+    ///         opening a new auction (batch back to voting) or in a live auction that has no bids
+    ///         yet (so a restarted auction can't lock the treasury out). After 30 days the auction
+    ///         itself may open at the lowest single vote, but the treasury still bids the majority
+    ///         price, which is never lower: one low vote can't block it or cheapen it. It never
+    ///         bids against a bidder.
     ///         `maxAmount` is the owner's price limit: if votes changed before this lands, it
     ///         reverts instead of overpaying. Anyone can outbid the treasury for 24 hours; the
     ///         refund comes back via collectRefund.
@@ -175,15 +177,11 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
         uint256 amount = pool.currentReserve(b); // majority minimum; reverts without quorum
         if (amount > maxAmount) revert PriceMoved();
         if (amount > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
-        if (state == 2) {
-            pool.startAuctionAt(b, amount); // reverts unless the auction opens at exactly this minimum
-        } else if (state == 3) {
-            (address high,, uint256 reserve,) = pool.auctions(b);
-            if (high != address(0)) revert AlreadyBid(); // someone is bidding: never compete
-            if (reserve != amount) revert PriceMoved();   // opened at another minimum (e.g. the fallback)
-        } else {
-            revert NotUnsold();
-        }
+        if (state == 2) pool.startAuction(b); // sole-holder batches revert here
+        else if (state != 3) revert NotUnsold();
+        (address high,, uint256 reserve,) = pool.auctions(b);
+        if (high != address(0)) revert AlreadyBid(); // someone is bidding: never compete
+        if (reserve > amount) revert PriceMoved();    // opened above the majority minimum
         pool.bid{value: amount}(b); // reverts if that live auction already ended
         emit TreasuryBid(b, amount);
     }

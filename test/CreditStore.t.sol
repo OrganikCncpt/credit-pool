@@ -267,14 +267,34 @@ contract CreditStoreTest is Test {
         new CreditPool(address(credits), address(stmts), address(stmts), address(feed), block.timestamp, st, st);
     }
 
-    // Audit fix (L-1): never at the 30-day lowest-single-vote fallback, only the majority minimum.
-    function test_NeverBuysAtThirtyDayLowestVote() public {
+    // After 30 days one low vote can't block the treasury or cheapen it: the auction may open at
+    // the lowest single vote, but the treasury always bids the majority price.
+    function test_After30DaysPaysMajorityNotLowestVote() public {
         _fundTreasury();
         (uint256 b,) = _unsold(0.002 ether);
-        vm.prank(bob); pool.setReserve(b, 0.001 ether);      // lowest single vote
-        vm.warp(block.timestamp + 31 days);                  // fallback now uses lowestVote
+        vm.prank(bob); pool.setReserve(b, 0.0001 ether);     // one low vote (bob: 35 slots, alice 40 + carol 5 unvoted)
+        vm.prank(alice); pool.setReserve(b, 0.002 ether);
+        vm.warp(block.timestamp + 31 days);
         assertTrue(pool.noReserveOpen(b));
-        vm.expectRevert(CreditPool.ReserveChanged.selector); // majority minimum ≠ fallback minimum
+        uint256 majority = pool.currentReserve(b);
+        assertEq(majority, 0.002 ether);
+        store.buyUnsold(b, majority);
+        (address hb, uint256 hbid, uint256 reserve,) = pool.auctions(b);
+        assertEq(hb, address(store));
+        assertEq(hbid, 0.002 ether);                         // majority price, not 0.0001
+        assertEq(reserve, 0.0001 ether);                      // the auction itself opened at the fallback
+    }
+
+    // A live auction opened ABOVE the majority minimum can't pull the treasury up.
+    function test_LiveAuctionAboveMajorityReverts() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        vm.prank(alice); pool.setReserve(b, 0.002 ether);
+        vm.prank(bob); pool.setReserve(b, 0.002 ether);
+        pool.startAuction(b);                                 // opens at 0.002
+        vm.prank(alice); pool.setReserve(b, 0.001 ether);   // majority drops back to 0.001
+        vm.prank(bob); pool.setReserve(b, 0.001 ether);
+        vm.expectRevert(CreditStore.PriceMoved.selector);
         store.buyUnsold(b, 1 ether);
     }
 

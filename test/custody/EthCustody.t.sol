@@ -503,6 +503,8 @@ contract EthCustodyUnitTest is Test {
     }
 
     // ── fee recipient that reverts: only fees are frozen, owner can re-point ──
+    // A fee wallet that rejects ETH holds back only the platform's own 25%; the store's 75% and
+    // every user payment still flow, and the held share pays out once the wallet is fixed.
     function test_Attack_RevertingTreasuryOnlyFreezesFees() public {
         RevertingTreasury rt = new RevertingTreasury();
         pool.setFeeRecipient(address(rt));
@@ -511,13 +513,22 @@ contract EthCustodyUnitTest is Test {
         vm.prank(b2); pool.bid{value: 2 ether}(b);
         vm.warp(block.timestamp + 1 days);
         pool.settle(b);
-        vm.expectRevert(CreditPool.TransferFailed.selector); pool.sweepFees();
+        uint256 fees = pool.accruedFees();
+        pool.sweepFees();                                            // doesn't revert
+        assertEq(address(pool.store()).balance, fees - fees / 4);   // treasury paid
+        assertEq(pool.platformFeesOwed(), fees / 4);                // platform share held
+        assertEq(pool.accruedFees(), 0);
+        pool.sweepFees();                                            // still held, not double-split
+        assertEq(pool.platformFeesOwed(), fees / 4);
+        assertEq(address(pool.store()).balance, fees - fees / 4);
         vm.prank(b1); pool.withdrawRefund();
         vm.prank(alice); pool.claim(b);
         vm.prank(bob); pool.claim(b);
         vm.prank(carol); pool.claim(b);
         pool.setFeeRecipient(treasury);
         pool.sweepFees();
+        assertEq(treasury.balance, fees / 4);                       // held share paid once fixed
+        assertEq(pool.platformFeesOwed(), 0);
         assertEq(address(pool).balance, 0);
         // non-owner can't redirect fees
         vm.prank(eve); vm.expectRevert(); pool.setFeeRecipient(eve);
@@ -896,7 +907,7 @@ contract EthCustodyInvariantTest is Test {
         }
         for (uint256 i; i < n; ++i) pending += pool.pendingReturns(h.actors(i));
         pending += pool.pendingReturns(h.eve());
-        uint256 obligations = liveBids + pending + unclaimed + pool.accruedFees();
+        uint256 obligations = liveBids + pending + unclaimed + pool.accruedFees() + pool.platformFeesOwed();
         assertGe(address(pool).balance, obligations, "INSOLVENT");
 
         // 2. contract state matches ghosts

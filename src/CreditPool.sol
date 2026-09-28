@@ -88,6 +88,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
 
     uint256 public openBatchId;
     uint256 public accruedFees;
+    uint256 public platformFeesOwed; // the platform's share, held when feeRecipient won't accept ETH
     address public feeRecipient;
 
     mapping(uint256 => Batch) internal _batches;
@@ -515,13 +516,23 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     }
 
     /// @notice Split accrued deposit fees: 25% to the platform, 75% to the store's treasury.
+    ///         The treasury's share always goes out. If feeRecipient rejects ETH, the platform's
+    ///         share is held in platformFeesOwed and paid on a later sweep, so a misconfigured
+    ///         fee wallet never holds up the treasury.
     function sweepFees() external nonReentrant {
         uint256 amt = accruedFees;
         accruedFees = 0;
-        uint256 platform = (amt * PLATFORM_SHARE_BPS) / 10_000;
-        _send(feeRecipient, platform);
-        _send(address(store), amt - platform);
-        emit FeesSwept(feeRecipient, platform, address(store), amt - platform);
+        uint256 share = (amt * PLATFORM_SHARE_BPS) / 10_000;
+        uint256 treasury = amt - share;
+        uint256 platform = share + platformFeesOwed;
+        platformFeesOwed = 0;
+        if (treasury != 0) _send(address(store), treasury);
+        bool paid = true;
+        if (platform != 0) {
+            (paid,) = feeRecipient.call{value: platform}("");
+            if (!paid) platformFeesOwed = platform;
+        }
+        emit FeesSwept(feeRecipient, paid ? platform : 0, address(store), treasury);
     }
 
     // ───────────────────────── views ─────────────────────────
