@@ -78,6 +78,11 @@ contract RevertBidder {
     receive() external payable { require(accept, "no eth"); }
 }
 
+/// Fee recipient that reverts with ~3 MB of revert data.
+contract ReturnBomb {
+    receive() external payable { assembly { revert(0, 3000000) } }
+}
+
 /// Fee recipient that always reverts.
 contract RevertingTreasury {
     receive() external payable { revert("nope"); }
@@ -503,6 +508,21 @@ contract EthCustodyUnitTest is Test {
     }
 
     // ── fee recipient that reverts: only fees are frozen, owner can re-point ──
+    // Verify2 #1: a fee wallet reverting with a ~3 MB payload can't burn the sweep's gas.
+    function test_ReturndataBombCantStallTreasury() public {
+        ReturnBomb bomb = new ReturnBomb();
+        pool.setFeeRecipient(address(bomb));
+        _auction();                                   // accrues deposit fees
+        uint256 fees = pool.accruedFees();
+        uint256 s0 = address(pool.store()).balance;
+        // The hostile wallet burns all gas forwarded to it (as any wallet could); the sweep just
+        // needs a normal budget for its own bookkeeping. Before the fix, copying the 3 MB revert
+        // payload ran even a 30M-gas sweep out of gas.
+        pool.sweepFees{gas: 30_000_000}();
+        assertEq(address(pool.store()).balance - s0, fees - fees / 4); // treasury paid
+        assertEq(pool.platformFeesOwed(), fees / 4);                     // platform share held
+    }
+
     // A fee wallet that rejects ETH holds back only the platform's own 25%; the store's 75% and
     // every user payment still flow, and the held share pays out once the wallet is fixed.
     function test_Attack_RevertingTreasuryOnlyFreezesFees() public {

@@ -124,6 +124,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     event RefundWithdrawn(address indexed who, uint256 amount);
     event FeesSwept(address indexed to, uint256 amount, address indexed treasury, uint256 treasuryAmount);
     event FeeRecipientSet(address indexed recipient);
+    event PlatformFeesHeld(address indexed recipient, uint256 amount);
 
     error WrongBatchState();
     error NotDepositor();
@@ -529,8 +530,14 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         if (treasury != 0) _send(address(store), treasury);
         bool paid = true;
         if (platform != 0) {
-            (paid,) = feeRecipient.call{value: platform}("");
-            if (!paid) platformFeesOwed = platform;
+            address r = feeRecipient;
+            // No returndata copy: a recipient reverting with a huge payload can't burn the gas
+            // the rest of the sweep needs.
+            assembly ("memory-safe") { paid := call(gas(), r, platform, 0, 0, 0, 0) }
+            if (!paid) {
+                platformFeesOwed = platform;
+                emit PlatformFeesHeld(r, platform);
+            }
         }
         emit FeesSwept(feeRecipient, paid ? platform : 0, address(store), treasury);
     }

@@ -130,6 +130,8 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | CP-39 | Constructor accepted the store as `feeRecipient` (verify pass, fix 6 partial) | Constructor rejects it too |
 | CP-40 | After 30 days one low minority vote blocked treasury purchases (was AR-16; owner asked to fix) | The store opens the auction (possibly at the fallback minimum) but always bids the majority price, which is never lower; a live auction above the majority minimum still reverts `PriceMoved` |
 | CP-41 | A `feeRecipient` rejecting ETH paused `sweepFees` for the treasury's share too (was AR-13; owner asked to fix) | Treasury's 75% always goes out; the platform's share is held in `platformFeesOwed` and paid on a later sweep (never re-split) |
+| CP-42 | `sweepFees` copied the fee wallet's returndata: a recipient reverting with ~3 MB ran even a 30M-gas sweep out of gas, stalling the treasury's share (verify pass 2) | Assembly call without returndata copy; `PlatformFeesHeld` event (`test_ReturndataBombCantStallTreasury`, fails on 542dccd) |
+| CP-43 | In a live no-bid auction, a majority could raise votes after it opened and the treasury bid the higher majority price (up to the owner's limit) (verify pass 2) | Treasury bids the price the auction opened at; only an auction opened by the 30-day fallback gets the majority price (`test_VoteRaiseAfterOpenDoesntRaiseTreasuryBid`, fails on 542dccd) |
 
 ## Accepted residuals (known, deliberate or out of our control)
 

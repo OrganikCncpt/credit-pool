@@ -285,17 +285,34 @@ contract CreditStoreTest is Test {
         assertEq(reserve, 0.0001 ether);                      // the auction itself opened at the fallback
     }
 
-    // A live auction opened ABOVE the majority minimum can't pull the treasury up.
-    function test_LiveAuctionAboveMajorityReverts() public {
+    // In a live auction the treasury pays the price that auction opened at, and only within
+    // the owner's limit; later vote changes don't move it.
+    function test_LiveAuctionPaysItsOpeningPrice() public {
         _fundTreasury();
         (uint256 b,) = _unsold(0.001 ether);
         vm.prank(alice); pool.setReserve(b, 0.002 ether);
         vm.prank(bob); pool.setReserve(b, 0.002 ether);
         pool.startAuction(b);                                 // opens at 0.002
-        vm.prank(alice); pool.setReserve(b, 0.001 ether);   // majority drops back to 0.001
+        vm.prank(alice); pool.setReserve(b, 0.001 ether);   // votes drop afterwards
         vm.prank(bob); pool.setReserve(b, 0.001 ether);
-        vm.expectRevert(CreditStore.PriceMoved.selector);
-        store.buyUnsold(b, 1 ether);
+        vm.expectRevert(CreditStore.PriceMoved.selector);   // above the owner's limit
+        store.buyUnsold(b, 0.001 ether);
+        store.buyUnsold(b, 0.002 ether);
+        (, uint256 hbid,,) = pool.auctions(b);
+        assertEq(hbid, 0.002 ether);
+    }
+
+    // Verify2 #2: raising votes after a live auction opened can't push the treasury up.
+    function test_VoteRaiseAfterOpenDoesntRaiseTreasuryBid() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        pool.startAuction(b);                                 // opens at 0.001
+        vm.prank(alice); pool.setReserve(b, 0.0025 ether);  // majority raises after the open
+        vm.prank(bob); pool.setReserve(b, 0.0025 ether);
+        store.buyUnsold(b, 1 ether);                         // even with a loose limit
+        (address hb, uint256 hbid,,) = pool.auctions(b);
+        assertEq(hb, address(store));
+        assertEq(hbid, 0.001 ether);                          // the price it opened at
     }
 
     function test_NoVotesNoPurchase() public {

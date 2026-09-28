@@ -13,6 +13,9 @@ interface ICreditPool {
     function unsoldAuctions(uint256 b) external view returns (uint256);
     function store() external view returns (address);
     function currentReserve(uint256 b) external view returns (uint256);
+    function assembledAt(uint256 b) external view returns (uint64);
+    function AUCTION_DURATION() external view returns (uint256);
+    function NO_RESERVE_AFTER() external view returns (uint256);
     function startAuction(uint256 b) external;
     function auctions(uint256 b) external view returns (address highBidder, uint256 highBid, uint256 reserve, uint64 endsAt);
     function batchInfo(uint256 b)
@@ -173,15 +176,21 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     ///         refund comes back via collectRefund.
     function buyUnsold(uint256 b, uint256 maxAmount) external onlyOwner nonReentrant {
         if (pool.unsoldAuctions(b) == 0) revert NotUnsold();
-        (uint8 state,,,,,) = pool.batchInfo(b);
-        uint256 amount = pool.currentReserve(b); // majority minimum; reverts without quorum
-        if (amount > maxAmount) revert PriceMoved();
-        if (amount > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
+        (uint8 state,, uint256 depositors,,,) = pool.batchInfo(b);
         if (state == 2) pool.startAuction(b); // sole-holder batches revert here
         else if (state != 3) revert NotUnsold();
-        (address high,, uint256 reserve,) = pool.auctions(b);
+        (address high,, uint256 reserve, uint64 endsAt) = pool.auctions(b);
         if (high != address(0)) revert AlreadyBid(); // someone is bidding: never compete
-        if (reserve > amount) revert PriceMoved();    // opened above the majority minimum
+        // With no bids, endsAt is still start + AUCTION_DURATION. An auction opened by the 30-day
+        // fallback sits at the lowest single vote, so the treasury pays the majority price instead;
+        // any other auction opened at the majority price of that moment, and the treasury pays
+        // exactly that (votes raised afterwards can't push it up).
+        bool fallbackOpen = depositors > 1
+            && endsAt - pool.AUCTION_DURATION() >= pool.assembledAt(b) + pool.NO_RESERVE_AFTER();
+        uint256 amount = fallbackOpen ? pool.currentReserve(b) : reserve; // currentReserve reverts without quorum
+        if (amount == 0 || amount < reserve) revert PriceMoved();
+        if (amount > maxAmount) revert PriceMoved();
+        if (amount > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
         pool.bid{value: amount}(b); // reverts if that live auction already ended
         emit TreasuryBid(b, amount);
     }

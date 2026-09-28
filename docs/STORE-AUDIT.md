@@ -28,6 +28,8 @@
 | CP-34, CP-39 | Info | `feeRecipient` could be the store (bid-fee sweep DoS). | access, verifier | Rejected in `setFeeRecipient` and in the constructor. | `test_FeeRecipientCantBeTheStore`, `test_ConstructorRejectsStoreAsFeeRecipient` |
 | CP-40 | Low | After 30 days, one low minority vote blocked all treasury purchases of that batch. | owner request (was AR-16) | The treasury opens the auction, possibly at the fallback minimum, but always bids the majority price, which is never lower. | `test_After30DaysPaysMajorityNotLowestVote`, `test_LiveAuctionAboveMajorityReverts` |
 | CP-41 | Low | A `feeRecipient` that rejects ETH paused sweeps, including the treasury's share. | owner request (was AR-13) | The treasury's 75% always goes out; the platform's 25% waits in `platformFeesOwed` and pays on the next sweep. | `test_Attack_RevertingTreasuryOnlyFreezesFees` |
+| CP-42 | Low | A fee wallet reverting with a ~3 MB payload stalled the treasury's sweep, because the returndata was copied. | 2nd verifier | The call no longer copies returndata; a `PlatformFeesHeld` event is emitted. | `test_ReturndataBombCantStallTreasury` (fails on 542dccd) |
+| CP-43 | Low | Votes raised after a live auction opened pushed the treasury's bid up. | 2nd verifier | The treasury pays the opening price. Only a 30-day fallback opening gets the majority price. | `test_VoteRaiseAfterOpenDoesntRaiseTreasuryBid` (fails on 542dccd) |
 | CP-35 | Info | Escrowed bid points had no events; Σ balances < totalSupply during bids. | access | Escrow moves points to the store's own balance with `Transfer` events. | fuzz `testFuzz_PointsConserved` |
 | CP-36 | Low (UI) | The leader couldn't raise their own store bid. | frontend | Held points count toward the raise. | real-Chrome run |
 | CP-37 | Low (UI) | A click on Deposit right after Approve was refused while the page redrew. | found during UI re-test | The send lock is released once the tx is final. | real-Chrome run |
@@ -62,6 +64,7 @@
 
 ## Test gate after fixes
 
-- 146 local tests pass, including 31 store tests.
+- 148 local tests pass.
+- 14 mainnet-fork tests pass, including 4 store scenarios on real Credits and the real Chainlink feed (`test/StoreFork.t.sol`).
 - Fork tests with real Credits pass.
 - The full local rehearsal passed: 100 burners, the store flow, and real-Chrome UI checks.
