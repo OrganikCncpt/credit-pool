@@ -13,9 +13,7 @@ interface ICreditPool {
     function unsoldAuctions(uint256 b) external view returns (uint256);
     function store() external view returns (address);
     function currentReserve(uint256 b) external view returns (uint256);
-    function assembledAt(uint256 b) external view returns (uint64);
-    function AUCTION_DURATION() external view returns (uint256);
-    function NO_RESERVE_AFTER() external view returns (uint256);
+    function openedByFallback(uint256 b) external view returns (bool);
     function startAuction(uint256 b) external;
     function auctions(uint256 b) external view returns (address highBidder, uint256 highBid, uint256 reserve, uint64 endsAt);
     function batchInfo(uint256 b)
@@ -169,25 +167,28 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     ///         opening a new auction (batch back to voting) or in a live auction that has no bids
     ///         yet (so a restarted auction can't lock the treasury out). After 30 days the auction
     ///         itself may open at the lowest single vote, but the treasury still bids the majority
-    ///         price, which is never lower: one low vote can't block it or cheapen it. It never
-    ///         bids against a bidder.
+    ///         price, which is never lower, and outbids any bid below that price: one low vote (plus
+    ///         a dust bid) can't block it or cheapen it. It never bids against a bid at or above
+    ///         the majority price.
     ///         `maxAmount` is the owner's price limit: if votes changed before this lands, it
     ///         reverts instead of overpaying. Anyone can outbid the treasury for 24 hours; the
     ///         refund comes back via collectRefund.
     function buyUnsold(uint256 b, uint256 maxAmount) external onlyOwner nonReentrant {
         if (pool.unsoldAuctions(b) == 0) revert NotUnsold();
-        (uint8 state,, uint256 depositors,,,) = pool.batchInfo(b);
+        (uint8 state,,,,,) = pool.batchInfo(b);
         if (state == 2) pool.startAuction(b); // sole-holder batches revert here
         else if (state != 3) revert NotUnsold();
-        (address high,, uint256 reserve, uint64 endsAt) = pool.auctions(b);
-        if (high != address(0)) revert AlreadyBid(); // someone is bidding: never compete
-        // With no bids, endsAt is still start + AUCTION_DURATION. An auction opened by the 30-day
-        // fallback sits at the lowest single vote, so the treasury pays the majority price instead;
-        // any other auction opened at the majority price of that moment, and the treasury pays
-        // exactly that (votes raised afterwards can't push it up).
-        bool fallbackOpen = depositors > 1
-            && endsAt - pool.AUCTION_DURATION() >= pool.assembledAt(b) + pool.NO_RESERVE_AFTER();
+        (address high, uint256 highBid, uint256 reserve,) = pool.auctions(b);
+        // The pool records at open whether the 30-day fallback opened this auction (at the lowest
+        // single vote); then the treasury pays the majority price instead. Any other auction opened
+        // at the majority price of that moment, and the treasury pays exactly that (votes raised
+        // afterwards can't push it up).
+        bool fallbackOpen = pool.openedByFallback(b);
         uint256 amount = fallbackOpen ? pool.currentReserve(b) : reserve; // currentReserve reverts without quorum
+        // Never compete with a bid at or above the majority price. The one exception: in a fallback
+        // auction a bid BELOW the majority price (e.g. a 1-wei vote plus a dust bid) is outbid by the
+        // treasury at the majority price, so the majority's price stays the floor.
+        if (high != address(0) && (!fallbackOpen || highBid >= amount)) revert AlreadyBid();
         if (amount == 0 || amount < reserve) revert PriceMoved();
         if (amount > maxAmount) revert PriceMoved();
         if (amount > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
@@ -270,11 +271,19 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     }
 
     /// @notice Send accumulated bid fees to the platform (the pool's fee recipient). Anyone can call.
+    ///         If the fee wallet won't take it, the fees simply stay here as bidFees (never treasury).
     function sweepBidFees() external nonReentrant {
         uint256 amt = bidFees;
-        bidFees = 0;
+        if (amt == 0) return;
         address to = pool.feeRecipient();
-        _send(to, amt);
+        bidFees = 0; // effects first: treasuryBalance() stays exact even during the call
+        bool paid;
+        // Same as the pool's sweep: bounded gas, no returndata copy.
+        assembly ("memory-safe") { paid := call(100000, to, amt, 0, 0, 0, 0) }
+        if (!paid) {
+            bidFees = amt; // held for a later sweep
+            return;
+        }
         emit BidFeesSwept(to, amt);
     }
 

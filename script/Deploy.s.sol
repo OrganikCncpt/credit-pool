@@ -29,7 +29,10 @@ contract Deploy is Script {
 
         // Guards: this script carries mainnet constants, so refuse anything that isn't mainnet
         // unless every address was supplied explicitly.
-        require(block.chainid == 1 || (credits != CREDITS && feed != ETH_USD), "mainnet constants on non-mainnet chain");
+        // On mainnet only the canonical Credits and Chainlink feed (a stray env var from a testnet
+        // session must not wire a test feed into the immutable fallback fee); elsewhere, both overridden.
+        if (block.chainid == 1) require(credits == CREDITS && feed == ETH_USD, "mainnet must use the real Credits and feed");
+        else require(credits != CREDITS && feed != ETH_USD, "mainnet constants on non-mainnet chain");
         require(statements.code.length > 0 && assembler.code.length > 0, "statements not deployed");
         require(credits.code.length > 0, "credits not deployed");
         require(feeRecipient != address(0), "FEE_RECIPIENT is zero");
@@ -41,6 +44,8 @@ contract Deploy is Script {
         require(owner != address(0), "OWNER is zero");
 
         vm.startBroadcast();
+        // OWNER must be a multisig contract, not the deploying key (it would stay owner of both).
+        if (block.chainid == 1) require(owner.code.length > 0 && owner != msg.sender, "OWNER must be a multisig contract");
         CreditStore store = new CreditStore(0); // treasury can't buy until OWNER raises the cap (3-day delay)
         pool = new CreditPool(credits, statements, assembler, feed, opensAt, feeRecipient, address(store));
         store.setPool(address(pool)); // one-time link; the store can't be pointed anywhere else later
@@ -53,7 +58,8 @@ contract Deploy is Script {
         console.log("CreditPool:", address(pool));
         console.log("deploy block:", block.number);
         console.log("owner:", pool.owner());
-        console.log("pending owner (must acceptOwnership):", pool.pendingOwner());
+        console.log("pool pending owner (must acceptOwnership):", pool.pendingOwner());
+        console.log("store pending owner (must acceptOwnership):", store.pendingOwner());
         console.log("assembly vault:", address(pool.vault()));
         console.log("CreditStore:", address(store));
         require(address(store.pool()) == address(pool) && address(pool.store()) == address(store), "store not linked");

@@ -11,6 +11,7 @@ import {MockCredits, MockStatements, MockFeed} from "../test/Mocks.sol";
 ///     --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 contract DeployLocal is Script {
     function run() external {
+        require(block.chainid == 31337, "local anvil only");
         address[4] memory users = [
             0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,
             0x70997970C51812dc3A010C7d01b50e0d17dc79C8,

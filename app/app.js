@@ -108,7 +108,7 @@ const TIPS = {
   approve: "Step 1 of 2: approve the pool, then deposit. " +
     "It's a one-time permission, and the pool only ever moves Credits you deposit yourself. You can revoke it any time.",
   selectAll: "Select every Credit in this wallet. Click a Credit to toggle it.",
-  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. Each Credit earns 2 SCREDIT once its batch fills. " +
+  deposit: "Step 2 of 2: moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. Each Credit earns 2 SCREDIT once its batch is burned into a Statement. " +
     "You can withdraw any time until the batch reaches 80.",
   depositNeedsApproval: "Approve the pool first (one time), then pick Credits.",
   depositNeedsPick: "Click the Credits you want to deposit first.",
@@ -118,7 +118,8 @@ const TIPS = {
   assemble: "Burns this batch's 80 Credits into one Statement, held by the pool for its depositors. " +
     "Anyone can press this. It's permanent.",
   redeem: "You hold all 80 slots, so the Statement is yours: sends it straight to your wallet. No auction, no fee.",
-  vote: "The lowest price you'd accept for this Statement. The auction minimum is the lowest price that " +
+  vote: "Takes effect immediately: once voters holding more than 40 slots accept a price, anyone can start the auction at it, so decide before you vote rather than planning to raise it later. " +
+    "The lowest price you'd accept for this Statement. The auction minimum is the lowest price that " +
     "more than 40 of the 80 slots accept, so a small group can't drag it below what most depositors agreed to. Enter 0 to clear your vote.",
   start: "Starts a 24-hour auction at the voted minimum. Opens once voters holding more than 40 of the 80 slots have voted. Anyone can press it.",
   startNoReserve: "This Statement has gone 30 days without selling, so quorum is no longer needed: anyone can start an auction whose minimum is the LOWEST price any depositor voted (none if nobody voted).",
@@ -133,7 +134,7 @@ const TIPS = {
   sweep: "Splits collected deposit fees: 25% to the platform, 75% to the store treasury (which only buys Statements that failed to sell). Anyone can trigger it; it can only go there.",
   storeBid: "Bid SCREDIT points, plus a {bidfee} platform fee in ETH per bid. Your points are held while you lead; if you're outbid they come straight back. If you win, they're spent.",
   storeSettle: "Ends this store auction: the Statement goes to the winner and their points are spent. Anyone can press this.",
-  points: "Store Credit: 2 points for every Credit you have in a batch when it fills (withdrawing before then earns none). They can't be sent, sold or traded; you can only bid them on Statements in the store.",
+  points: "Store Credit: 2 points for every Credit you have in a batch when it's burned into a Statement (withdrawn Credits and dissolved batches earn none). They can't be sent, sold or traded; you can only bid them on Statements in the store.",
 };
 
 const tipEl = () => document.getElementById("tip");
@@ -315,6 +316,10 @@ async function init() {
     [S.art, S.statements, S.store] = await Promise.all([tryRead("art", [], S.credits, CREDITS_ABI), tryRead("statements"), tryRead("store")]);
   } catch {
     return notice(`Can't reach the pool at ${S.pool} on ${S.dep.name}. Is the RPC up?`);
+  }
+  // A wrong or tampered pool address must not get approval over your Credits: pin the real ones.
+  if (S.dep.credits && S.credits.toLowerCase() !== S.dep.credits.toLowerCase()) {
+    return notice(`The pool at ${S.pool} doesn't use the real Credits contract. Not loading it.`);
   }
   const blk = await S.pub.getBlock();
   S.clockSkew = Number(blk.timestamp) - Math.floor(Date.now() / 1000);
@@ -595,7 +600,7 @@ async function loadArt(tiles) {
         let img = null, tier = null, print = null;
         try {
           const json = JSON.parse(atob(uri.split(",")[1]));
-          img = json.image;
+          img = onchainImage(json.image);
           const attr = Object.fromEntries((json.attributes ?? []).map((a) => [a.trait_type, a.value]));
           tier = tierOf(attr.Eights);
           print = attr.Print;
@@ -638,7 +643,7 @@ function updateDepositHint() {
   if (!S.approved) return ($("deposit-hint").textContent = "Approve the pool once, then pick Credits to deposit.");
   if (!n) return ($("deposit-hint").textContent = "Pick Credits to deposit (rarest shown first). Every Credit counts as one slot, whatever its rarity. You can withdraw until the batch fills.");
   const txs = chunkSizes(Number(n)).length;
-  const fee = `Fee: ${feeUsd(depositUsd(n))} (${Number(n) >= BULK_MIN ? `bulk rate, ${feeUsd(1)}` : feeUsd(2)} per Credit). Earns ${2n * n} SCREDIT when the batch fills.`;
+  const fee = `Fee: ${feeUsd(depositUsd(n))} (${Number(n) >= BULK_MIN ? `bulk rate, ${feeUsd(1)}` : feeUsd(2)} per Credit). Earns ${2n * n} SCREDIT when the batch is burned into a Statement.`;
   const nudge = Number(n) < BULK_MIN ? ` Tip: ${BULK_MIN}+ Credits at once cost ${feeUsd(1)} each.` : "";
   if (txs > 1) return ($("deposit-hint").textContent = `${n} Credits → ${txs} transactions (gas limit). ${fee}`);
   const room = PER - S.openFilled;
@@ -674,13 +679,12 @@ $("deposit").onclick = async () => {
       ? `They go into batch #${shownBatch}, taking it to ${shownFilled + BigInt(ids.length)}/80.`
       : `${room} fill batch #${shownBatch}; the rest start the next batch.`,
     `Fee: ${feeUsd(depositUsd(ids.length))} total (≈ ${ethFee(totalWei)})${txs > 1 ? `, across ${txs} transactions` : ""}: ${feeRule()}. Not refunded if you withdraw.`,
-    `You earn ${2 * ids.length} SCREDIT when their batch fills (store points; they can't be transferred). Withdraw before then and you earn none.`,
+    `You earn ${2 * ids.length} SCREDIT when their batch is burned into a Statement (store points; they can't be transferred). Withdrawn Credits earn none.`,
     "You can withdraw them any time until their batch reaches 80. After that they're locked in.",
   ], "Deposit");
   if (!ok) return;
   // The first tx is pinned to the batch state the user just confirmed; later chunks follow our own deposits.
   let expect = [shownBatch, shownFilled];
-  S.selected.clear();
   // Split big deposits under the per-tx gas cap. Each tx pays its own fee.
   const chunks = [];
   for (let i = 0, k = 0; k < sizes.length; i += sizes[k++]) chunks.push(ids.slice(i, i + sizes[k]));
@@ -689,7 +693,8 @@ $("deposit").onclick = async () => {
     // Pin the batch we showed the user: if someone deposits first, the tx reverts instead of
     // landing somewhere unexpected. 5% fee buffer against price moves; the pool refunds the excess.
     const due = usdW * BigInt(chunk.length * perCredit(chunk.length)); // = depositFeeFor(chunk.length)
-    if (!(await send(label, "depositAt", [chunk, ...expect], due + due / 20n))) break;
+    if (!(await send(label, "depositAt", [chunk, ...expect], due + due / 20n))) break; // selection kept on failure
+    for (const id of chunk) S.selected.delete(id);
     const openNow = await readFresh("openBatchId");
     expect = [openNow, (await readFresh("batchInfo", [openNow]))[1]];
   }
@@ -780,8 +785,9 @@ function renderFilters() {
 $("more").onclick = () => renderAllPage();
 $("jump").onsubmit = async (e) => {
   e.preventDefault();
-  const v = $("jump-id").value;
+  const v = $("jump-id").value.trim();
   if (v === "") return;
+  if (!/^\d+$/.test(v)) return toast("Enter a batch number", true);
   const b = BigInt(v);
   if (b > S.openBatch) return toast(`Batch #${b} doesn't exist yet`, true);
   const card = await batchCard(b);
@@ -1051,11 +1057,13 @@ function bidList(bids, top, me) {
   box.append(list);
   return box;
 }
+// Only embedded images: a remote URL in tokenURI would let its host see who is viewing.
+const onchainImage = (src) => (typeof src === "string" && src.startsWith("data:image/") ? src : null);
 const statementImg = memo(async (sid) => {
   try {
     const uri = await read("tokenURI", [sid], S.statements, STATEMENTS_ABI);
     const json = uri.startsWith("data:") ? JSON.parse(atob(uri.split(",")[1])) : null;
-    return json?.image ?? null;
+    return onchainImage(json?.image);
   } catch { return null; }
 });
 

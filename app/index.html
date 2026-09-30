@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Scripts only from this site; data: images only (on-chain art); RPC over https (plus the local demo chain).
+     Also send frame-ancestors 'none' as an HTTP header from the host: it can't be set in a meta tag. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: http://127.0.0.1:8545 http://localhost:8545; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>credit.pool</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2300a3e0'/%3E%3Crect x='9' width='7' height='7' fill='%23e0007a'/%3E%3Crect y='9' width='7' height='7' fill='%23f5d000'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%23111'/%3E%3C/svg%3E">
@@ -38,7 +41,7 @@
       <li><b>Deposit</b><span>Add any number of Credits to the open batch. Withdraw any time until it fills.</span></li>
       <li><b>Assemble</b><span>At 80, the batch locks and burns into one Statement, held for its depositors.</span></li>
       <li><b>Vote &amp; auction</b><span>Depositors vote a minimum price, then a 24h auction open to anyone.</span></li>
-      <li><b>Collect</b><span>Your share = your Credits ÷ 80 of the whole sale: no sale fee. Every Credit in a batch that fills also earns you 2 SCREDIT for the store.</span></li>
+      <li><b>Collect</b><span>Your share = your Credits ÷ 80 of the whole sale: no sale fee. Every Credit burned into a Statement also earns you 2 SCREDIT for the store.</span></li>
     </ol>
     <div class="stats" id="stats"></div>
   </section>
@@ -104,7 +107,7 @@
     <details><summary>What does it cost?</summary>
       <p>Depositing costs <span class="fee-usd" data-mult="2">$2</span> per Credit, or <span class="fee-usd">$1</span> per Credit when you deposit 6 or more at once, paid in ETH at the current price (if the price feed is ever offline, a fixed ETH amount set at launch is used instead, so deposits never stop). 25% goes to the platform and 75% to the store treasury. Auction sales have no fee: depositors get the whole price. Bidding in the store costs <span class="fee-usd" data-mult="0.25">$0.25</span> per bid. Nothing else.</p></details>
     <details><summary>What is SCREDIT?</summary>
-      <p>Store Credit: you earn 2 points for every Credit you have in a batch when it fills (Credits withdrawn before then earn none). Points can't be sent, sold or traded. You can only bid them on Statements in the store. If you're outbid your points come back; if you win they're spent.</p></details>
+      <p>Store Credit: you earn 2 points for every Credit you have in a batch when it's burned into a Statement (withdrawn Credits and dissolved batches earn none). Points can't be sent, sold or traded. You can only bid them on Statements in the store. If you're outbid your points come back; if you win they're spent.</p></details>
     <details><summary>Where do store Statements come from?</summary>
       <p>The store treasury (75% of deposit fees) steps in only when a Statement's auction ends with no bids: it opens a new auction with a bid at exactly the minimum voted by more than half the batch's slots, and anyone can still outbid it for 24 hours. It only ever places the first bid (never against another bidder), never buys without a majority-voted minimum, and each purchase is capped (raising the cap takes 3 days to apply). The platform decides which unsold Statements the treasury buys.</p></details>
     <details><summary>Can I get my Credits back?</summary>

@@ -74,13 +74,12 @@ contract StoreForkTest is Test {
     // treasury buys at the majority price, SCREDIT auction with real $0.25 bid fees.
     function test_StoreFork_FullLifecycle() public forked {
         _dep(alice, 40); _dep(bob, 39);
-        assertEq(store.totalSupply(), 0, "no points before the batch fills");
-        _dep(carol, 1);                                   // fills: points for all three
+        _dep(carol, 1);                                   // fills the batch
+        assertEq(store.totalSupply(), 0, "no points until the batch is burned");
+        pool.assemble(0);                                 // burns 80 REAL Credits → points for all three
         assertEq(store.balanceOf(alice), 80);
         assertEq(store.balanceOf(bob), 78);
         assertEq(store.balanceOf(carol), 2);
-
-        pool.assemble(0);                                 // burns 80 REAL Credits
         (,,, uint256 sid,,) = pool.batchInfo(0);
         assertEq(stmts.ownerOf(sid), address(pool));
 
@@ -158,16 +157,20 @@ contract StoreForkTest is Test {
             _dep(u, 1);
         }
         vm.deal(address(0xB0000), 1 ether);
-        uint256 used = _dep(address(0xB0000), 1);
-        console.log("fill with 80 real depositors, gas:", used);
-        assertLt(used, 4_000_000);
+        _dep(address(0xB0000), 1);                        // fills batch #0 with 80 depositors
+        uint256 g = gasleft();
+        pool.assemble(0);                                 // real burn + award to 80 depositors
+        uint256 used = g - gasleft();
+        console.log("assemble 80 real Credits + award 80 depositors, gas:", used);
+        assertLt(used, TX_GAS_CAP);
         assertEq(store.totalSupply(), 160);
         // and the biggest frontend deposit filling a batch stays under the cap
         vm.deal(alice, 10 ether);
         uint256 big = _dep(alice, 100);
         console.log("100 real Credits (fills a batch), gas:", big);
         assertLt(big, TX_GAS_CAP);
-        assertEq(store.balanceOf(alice), 160);            // batch #1 filled by alice alone
+        pool.assemble(1);
+        assertEq(store.balanceOf(alice), 160);            // batch #1: alice alone, points on assembly
     }
 
     // A fee wallet that rejects ETH doesn't hold up the treasury's share.

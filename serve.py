@@ -8,4 +8,4 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 5173
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
-http.server.ThreadingHTTPServer(("", port), functools.partial(NoCache, directory=root)).serve_forever()
+http.server.ThreadingHTTPServer(("127.0.0.1", port), functools.partial(NoCache, directory=root)).serve_forever()

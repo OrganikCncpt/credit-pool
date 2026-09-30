@@ -24,3 +24,16 @@ were applied (known-state CP-22).
 
 Not yet run: Aderyn, Semgrep,
 Echidna/Medusa. Foundry handler invariants cover E1, C1, C2 and C4 (see `docs/AUDIT-SCOPE.md`).
+
+## Re-run 2026-09-30 (full audit #3, after `CreditStore` and the fee changes)
+
+Slither 0.11.5, same command. **Result: still no true positives.** New or changed hits:
+
+| Detector | Where | Verdict |
+|---|---|---|
+| reentrancy-eth (High) | `CreditPool.sweepFees`: `platformFeesOwed` written after sending the treasury's share to the store and trying the fee wallet | **Not exploitable.** `sweepFees` is `nonReentrant`; the store's `receive` only checks the sender and makes no calls; the fee wallet gets a fixed 100k gas with no returndata copy, and every other state-changing pool function is `nonReentrant` (proven by tests). `platformFeesOwed` is zeroed before the calls and only re-set when the payment fails. |
+| reentrancy-balance (High), +3 | `CreditPool.assemble`, `AssemblyVault.assemble` | Same by-design custody delta checks as before. |
+| reentrancy-no-eth (Medium), +1 | `_deposit` (loop-carried), `assemble` (now also awards points via the store) | All `nonReentrant`; real Credits `transferFrom` has no receiver callback; `store.award` is our own fixed code with no external calls. |
+| unused-return (Medium), +2 | `CreditStore.buyUnsold` destructures `batchInfo` / `auctions` | Intended: only the needed fields are used. |
+| low-level-calls / assembly (Info) | the two bounded fee-wallet payments | Deliberate: fixed gas, no returndata copy (CP-48, CP-49). |
+

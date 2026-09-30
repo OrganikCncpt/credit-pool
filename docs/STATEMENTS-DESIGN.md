@@ -83,4 +83,5 @@ Ideas to evaluate once the real layering rules are known:
 | S-4 | Layering rules: who may add a layer, whether it's exactly 80 Credits, whether the Statement's owner must approve, and whether a layer mints anything | Design 3, and our "exactly one new Statement" checks |
 | S-5 | Is there any randomness inside Jack's contract (for example misregistration)? What is it seeded by? | If the caller can influence it, `assemble` timing becomes a lever |
 | S-6 | Do layers or the order count toward the 1,526 cap? | The cap guard on deposits (OK-2) |
+| S-8 | How does it deliver the Statement: safe mint with a callback, or plain mint? Is there a mint counter or `totalSupply`? | Lets the vault prove the returned id was minted in this call, so a Statement donated to the vault can't be swapped in (OK-11) |
 | S-7 | Everything in OK-1..OK-5 and `AUDIT-SCOPE.md` §6 | Contract callers, signatures, per-address caps, mint recipient, burn vs escrow, transfer restrictions |

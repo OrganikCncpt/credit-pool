@@ -91,8 +91,7 @@ ok(u("openBatchId()(uint256)") == 5, "5 full batches + 1 filling (batch #5 at 10
 total_credits = 80 * 5 + 10
 ok(u("accruedFees()(uint256)") == paid_fees, f"deposit fees exact: $2/Credit under 6, $1/Credit for 6+ ({from_wei(paid_fees)})")
 pts = lambda a: u("balanceOf(address)(uint256)", a, to=STORE)
-ok(u("totalSupply()(uint256)", to=STORE) == 2 * 80 * 5, "SCREDIT: 2 points per Credit for the 5 full batches only (800); batch #5 is still filling")
-ok(all(pts(w) == 2 * len(deposited[w]) for w in A), "every batch #0 depositor holds exactly 2 × their Credits in points")
+ok(u("totalSupply()(uint256)", to=STORE) == 0, "SCREDIT: no points yet, nothing has been burned into a Statement")
 ok(u("balanceOf(address)(uint256)", POOL, to=CREDITS) == total_credits, f"pool holds all {total_credits} Credits")
 
 # ───────────── F: withdraw while filling ─────────────
@@ -207,4 +206,7 @@ ok(pool_eth() < 3 * 80, f"pool left holding only rounding dust ({pool_eth()} wei
 ok(u("balanceOf(address)(uint256)", POOL, to=CREDITS) == 6, "pool holds only batch #5's 6 Credits")
 burned = sum(1 for w in A + B + C + D for i in deposited[w] if owner_of(CREDITS, i) is None)
 ok(burned == 320, "320 Credits burned for 4 Statements")
+ok(u("totalSupply()(uint256)", to=STORE) == 2 * 320, "SCREDIT: 640 points, 2 per burned Credit; the dissolved batch #4 earned none")
+ok(all(pts(w) == 2 * len(deposited[w]) for w in A), "every batch #0 depositor holds exactly 2 × their Credits in points")
+ok(all(pts(w) == 0 for w in E), "batch #4 depositors (escape hatch) hold no points")
 print(f"\nALL {checks} CHECKS PASSED")

@@ -29,7 +29,7 @@ interface AggregatorV3Interface {
 ///         80 slots or sold by on-chain English auction, with proceeds split pro-rata by slots.
 ///         Deposit fee: $2 (in ETH) per Credit, or $1 per Credit when depositing 6 or more at
 ///         once. 25% of it goes to the platform and 75% to the store's treasury. When a batch
-///         fills, each depositor earns 2 SCREDIT points per Credit in it. Auction sales carry no fee: depositors get 100%.
+///         is burned into a Statement, each depositor earns 2 SCREDIT points per Credit in it. Auction sales carry no fee: depositors get 100%.
 contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     // ───────────────────────── constants ─────────────────────────
     uint256 public constant CREDITS_PER_STATEMENT = 80;
@@ -38,10 +38,14 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     uint256 public constant BULK_FEE_USD_PER_CREDIT = 1;    // ...or $1 per Credit for a deposit of
     uint256 public constant BULK_MIN_CREDITS = 6;           // at least this many in one transaction
     uint256 public constant PLATFORM_SHARE_BPS = 2500;      // 25% of deposit fees; 75% to the treasury
-    uint256 public constant POINTS_PER_CREDIT = 2;          // SCREDIT per Credit, awarded when its batch fills
+    uint256 public constant POINTS_PER_CREDIT = 2;          // SCREDIT per Credit, awarded when its batch is assembled
     // Chainlink ETH/USD heartbeat is 1h, so a 1h limit bricks deposits at every heartbeat edge.
     // The fee is $1-2; a day-old price is off by cents. This only guards against a dead feed.
     uint256 public constant ORACLE_MAX_AGE = 1 days;
+    // A price outside this range means a broken feed: use the fallback instead of pricing off it.
+    uint256 public constant MIN_ETH_USD = 10;
+    uint256 public constant FEE_CALL_GAS = 100_000;          // gas given to feeRecipient when paying it
+    uint256 public constant MAX_ETH_USD = 10_000_000;
     uint256 public constant ESCAPE_DELAY = 14 days;         // full-but-unassembled escape hatch
     uint256 public constant AUCTION_DURATION = 24 hours;
     uint256 public constant AUCTION_EXTENSION = 15 minutes; // anti-snipe window
@@ -107,6 +111,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     mapping(uint256 => bool) public statementAssigned;                      // statementId => already backs a batch
     mapping(address => uint256) public pendingReturns;                      // outbid refunds
     mapping(uint256 => uint256) public unsoldAuctions;                      // batch => auctions that ended with no bids
+    mapping(uint256 => bool) public openedByFallback;                       // batch => current/last auction opened by the 30-day fallback
 
 
     // ───────────────────────── events ─────────────────────────
@@ -198,6 +203,8 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     function _liveFee() internal view returns (uint256) {
         try ethUsdFeed.latestRoundData() returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
             if (price <= 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > ORACLE_MAX_AGE) return 0;
+            uint256 unit = 10 ** _feedDecimals;
+            if (uint256(price) < MIN_ETH_USD * unit || uint256(price) > MAX_ETH_USD * unit) return 0;
             // $1 / (ETH/USD)  →  wei
             return (USD * 10 ** _feedDecimals * 1e18) / (uint256(price) * 1e8);
         } catch {
@@ -252,7 +259,6 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
                 batch.fullAt = uint64(block.timestamp);
                 emit BatchFull(b);
                 openBatchId = b + 1;
-                _awardPoints(b); // only Credits that stay in a filled batch earn points (no deposit/withdraw farming)
             }
         }
 
@@ -334,6 +340,9 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         batch.state = BatchState.Assembled;
         batch.assembledAt = uint64(block.timestamp);
         emit Assembled(b, sid);
+        // Points only for Credits actually burned into a Statement: nothing for batches that are
+        // withdrawn or dissolved, so deposit/withdraw and escape-hatch cycles can't farm them.
+        _awardPoints(b);
     }
 
     // ───────────────────────── settlement ─────────────────────────
@@ -395,7 +404,9 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         // A sole 80-slot holder decides alone: they can redeem, or auction it themselves, but no
         // one else can push their Statement into a sale (external audit #1, H-02; extends CP-12).
         if (batch.depositors.length == 1 && msg.sender != batch.depositors[0]) revert NotDepositor();
-        uint256 reserve = auctionReserve(b);
+        bool fallbackOpen = noReserveOpen(b); // recorded now: anti-snipe extensions move endsAt later
+        uint256 reserve = fallbackOpen ? lowestVote(b) : currentReserve(b);
+        openedByFallback[b] = fallbackOpen;
         batch.state = BatchState.Auction;
         uint64 endsAt = uint64(block.timestamp + AUCTION_DURATION);
         auctions[b] = Auction(address(0), 0, reserve, endsAt);
@@ -531,9 +542,9 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         bool paid = true;
         if (platform != 0) {
             address r = feeRecipient;
-            // No returndata copy: a recipient reverting with a huge payload can't burn the gas
-            // the rest of the sweep needs.
-            assembly ("memory-safe") { paid := call(gas(), r, platform, 0, 0, 0, 0) }
+            // Bounded gas and no returndata copy: a recipient that burns gas or reverts with a huge
+            // payload can't starve the rest of the sweep (the treasury's share stays paid).
+            assembly ("memory-safe") { paid := call(FEE_CALL_GAS, r, platform, 0, 0, 0, 0) }
             if (!paid) {
                 platformFeesOwed = platform;
                 emit PlatformFeesHeld(r, platform);
@@ -568,7 +579,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         revert UnexpectedToken();
     }
 
-    /// @dev One call to the (trusted, deploy-time) store with every depositor of the batch that just filled.
+    /// @dev One call to the (trusted, deploy-time) store with every depositor of the batch just assembled.
     function _awardPoints(uint256 b) internal {
         address[] storage ds = _batches[b].depositors;
         uint256[] memory pts = new uint256[](ds.length);

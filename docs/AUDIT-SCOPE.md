@@ -38,19 +38,21 @@ Revenue: a deposit fee of $2 per Credit ($1 each for 6+ at once), swept (permiss
 
 ## 2. Scope
 
-Current: tag **`audit-prep-2`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-2
-(fixes for external audit #1; see `docs/EXTERNAL-AUDIT-1-TRIAGE.md`).
-Previously audited: tag `audit-prep-1`, commit `30d172a`.
-(Later commits on `main` change CI and docs only; the in-scope contracts are unchanged.)
+Current: tag **`audit-prep-3`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-3.
+It adds `CreditStore` (SCREDIT points, treasury, store auction), the tiered deposit fee and the
+removed sale fee. Everything since external audit #1 has had internal reviews only:
+`docs/STORE-AUDIT.md` and `docs/FULL-AUDIT-3.md`.
+Previously audited externally: tag `audit-prep-1` (commit `30d172a`); fixes at `audit-prep-2`
+(`docs/EXTERNAL-AUDIT-1-TRIAGE.md`).
 
 | File | nSLOC | Notes |
 |---|---:|---|
-| `src/CreditPool.sol` | 401 | Batches, custody, voting, auction, payouts, fees |
+| `src/CreditPool.sol` | 445 | Batches, custody, voting, auction, payouts, tiered fees, fee split, points award on assembly |
 | `src/AssemblyVault.sol` | 59 | Custody firewall between the pool and the Statements contract |
-| `src/CreditStore.sol` | ~130 | **New since audit #1:** SCREDIT points, treasury (buy-unsold only), SCREDIT store auction |
+| `src/CreditStore.sol` | 212 | **New since audit #1:** SCREDIT points, treasury (buy-unsold only), SCREDIT store auction |
 | `src/IStatementAssembler.sol` | 4 | **Placeholder** for the unpublished Statements interface |
-| `script/Deploy.s.sol` | 36 | Mainnet deploy with parameter guards |
-| **Total** | **500** | |
+| `script/Deploy.s.sol` | 47 | Mainnet deploy with parameter guards (canonical addresses, multisig owner) |
+| **Total** | **767** | |
 
 Compiler: solc **0.8.28** (pinned), optimizer on, 200 runs, default (non-IR) pipeline.
 Dependencies: OpenZeppelin Contracts **v5.7.0** (`ReentrancyGuard`, `Ownable2Step`, ERC-721 interfaces).
@@ -130,7 +132,7 @@ contract is published, confirm:
 
 ```bash
 forge build
-forge test                                                        # 112 local tests
+forge test                                                        # 154 local tests
 MAINNET_RPC=<rpc> forge test --match-contract Fork                # real Credits on a mainnet fork
 forge coverage --no-match-contract Fork --no-match-path "test/custody/NftCustody.t.sol" --report summary
 ```

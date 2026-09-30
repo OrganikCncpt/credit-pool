@@ -74,11 +74,13 @@ contract CreditStoreTest is Test {
 
     // ───────────────────────── points ─────────────────────────
 
-    // Points arrive when the batch fills: 2 per Credit each depositor has in it.
-    function test_PointsAreTwoPerCreditWhenBatchFills() public {
+    // Points arrive when the batch is burned into a Statement: 2 per Credit each depositor has in it.
+    function test_PointsAreTwoPerCreditWhenAssembled() public {
         _deposit(alice, 1); _deposit(alice, 2); _deposit(bob, 5);
         assertEq(store.totalSupply(), 0);               // nothing yet: the batch is still filling
         _deposit(carol, 72);                            // fills it: 3 + 5 + 72 = 80
+        assertEq(store.totalSupply(), 0);               // full, not burned yet: still nothing
+        pool.assemble(0);
         assertEq(store.balanceOf(alice), 6);
         assertEq(store.balanceOf(bob), 10);
         assertEq(store.balanceOf(carol), 144);
@@ -87,7 +89,7 @@ contract CreditStoreTest is Test {
         assertEq(store.balanceOf(alice), 6);
     }
 
-    // Worst case for the award loop: 80 different depositors, the last deposit fills the batch.
+    // Worst case for the award loop: 80 different depositors, awarded when the batch is assembled.
     function test_FillAwardGas_80Depositors() public {
         for (uint256 i; i < 79; ++i) {
             address u = address(uint160(0x10000 + i));
@@ -100,14 +102,114 @@ contract CreditStoreTest is Test {
         uint256[] memory one = new uint256[](1);
         credits.mint(address(0x20000), nextId); one[0] = nextId++;
         uint256 fee = pool.depositFeeFor(1);
-        vm.prank(address(0x20000));
+        vm.prank(address(0x20000)); pool.deposit{value: fee}(one);
         uint256 g = gasleft();
-        pool.deposit{value: fee}(one);
+        pool.assemble(0);                               // the award now runs here
         uint256 used = g - gasleft();
-        emit log_named_uint("filling deposit with 80 depositors, gas", used);
-        assertLt(used, 3_000_000);
+        emit log_named_uint("assemble + award to 80 depositors, gas", used);
+        assertLt(used, 8_000_000);
         assertEq(store.totalSupply(), 160);
         assertEq(store.balanceOf(address(0x20000)), 2);
+    }
+
+    // Full audit (FA): a batch that fills but dissolves through the escape hatch earns no points,
+    // so the same Credits can't be cycled every 14 days for points.
+    function test_DissolvedBatchEarnsNoPoints() public {
+        _deposit(eve, 80);
+        vm.warp(block.timestamp + 15 days);
+        uint256[] memory ids = new uint256[](80);
+        for (uint256 i; i < 80; ++i) ids[i] = nextId - 80 + i;
+        vm.prank(eve); pool.withdraw(ids);             // escape hatch: Dissolved
+        assertEq(store.balanceOf(eve), 0);
+        assertEq(store.totalSupply(), 0);
+    }
+
+    // FA game F1: after 30 days a 1-slot holder votes 1 wei, opens the fallback auction and
+    // dust-bids; the treasury still outbids at the majority price, so it can't be locked out.
+    function test_FallbackDustBidCantLockOutTreasury() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.002 ether);                 // batch: carol 5, alice 40, bob 35
+        vm.warp(block.timestamp + 31 days);
+        vm.prank(carol); pool.setReserve(b, 1);               // 5 slots vote 1 wei
+        vm.prank(carol); pool.startAuction(b);                // fallback opens at 1 wei
+        vm.prank(eve); pool.bid{value: 1}(b);                 // dust bid first
+        store.buyUnsold(b, 0.002 ether);
+        (address hb, uint256 hbid,,) = pool.auctions(b);
+        assertEq(hb, address(store));
+        assertEq(hbid, 0.002 ether);                           // majority price
+        vm.prank(eve); pool.bid{value: 0.0021 ether}(b);      // but a real bid above it still wins
+        vm.expectRevert(CreditStore.AlreadyBid.selector);      // and the treasury never chases it
+        store.buyUnsold(b, 1 ether);
+    }
+
+    // Anti-snipe extensions must not make a NORMAL auction look like a fallback one: the pool
+    // records how the auction opened, so the treasury still never outbids this real buyer.
+    function test_BiddingWarDoesntMakeNormalAuctionLookFallback() public {
+        _fundTreasury();
+        (uint256 b,) = _unsold(0.001 ether);
+        uint64 asm = pool.assembledAt(b);
+        vm.warp(asm + 29 days + 12 hours);                    // normal open, before day 30
+        assertFalse(pool.noReserveOpen(b));
+        pool.startAuction(b);
+        assertFalse(pool.openedByFallback(b));
+        (,,, uint64 endsAt) = pool.auctions(b);
+        vm.warp(endsAt - 1 minutes);
+        uint256 amt = 0.001 ether;
+        for (uint256 i; i < 70; ++i) {                        // bidding war: each bid adds 15 minutes
+            vm.deal(eve, amt);
+            vm.prank(eve); pool.bid{value: amt}(b);
+            (,,, endsAt) = pool.auctions(b);
+            vm.warp(endsAt - 1 minutes);
+            amt = amt * 106 / 100;
+        }
+        assertGe(endsAt - 24 hours, asm + 30 days);           // the old timestamp heuristic would say "fallback"
+        vm.prank(alice); pool.setReserve(b, 1 ether);         // majority raises far above the high bid
+        vm.prank(bob); pool.setReserve(b, 1 ether);
+        vm.expectRevert(CreditStore.AlreadyBid.selector);      // still never competes with a real buyer
+        store.buyUnsold(b, 1 ether);
+    }
+
+    // FA: a fee wallet that won't take ETH leaves bid fees in the store; the sweep doesn't revert.
+    function test_SweepBidFeesHoldsOnRejectingWallet() public {
+        uint256 sid = _storeOwns(0.001 ether);
+        store.list(sid, 1);
+        uint256 fee = store.bidFee();
+        vm.prank(alice); store.bid{value: fee}(sid, 1);
+        GasBurner burner = new GasBurner();
+        pool.setFeeRecipient(address(burner));
+        uint256 t0 = store.treasuryBalance();
+        store.sweepBidFees{gas: 500_000}();                    // no revert
+        assertEq(store.bidFees(), fee);                         // held
+        assertEq(store.treasuryBalance(), t0);                  // never counted as treasury
+        pool.setFeeRecipient(platform);
+        store.sweepBidFees();
+        assertEq(store.bidFees(), 0);
+    }
+
+    // FA eth I-1: a fee wallet that burns all its gas can't make sweepFees revert (the treasury
+    // still gets its 75%), even with a modest gas budget.
+    function test_GasBurningFeeWalletCantStallTreasury() public {
+        GasBurner burner = new GasBurner();
+        pool.setFeeRecipient(address(burner));
+        _deposit(alice, 10);
+        uint256 fees = pool.accruedFees();
+        pool.sweepFees{gas: 300_000}();
+        assertEq(store.treasuryBalance(), fees - fees / 4);
+        assertEq(pool.platformFeesOwed(), fees / 4);
+    }
+
+    // FA dos F4: an absurd feed price falls back to the frozen fee instead of jamming deposits.
+    function test_AbsurdFeedPricesUseFallback() public {
+        uint256 fb = pool.fallbackFeeWei();
+        feed.set(1e8, block.timestamp);                         // $1 ETH: below $10
+        assertTrue(pool.feeUsesFallback()); assertEq(pool.usdWei(), fb);
+        feed.set(20_000_000e8, block.timestamp);                // $20M ETH: above $10M
+        assertTrue(pool.feeUsesFallback()); assertEq(pool.usdWei(), fb);
+        feed.set(type(int256).max, block.timestamp);            // would overflow: no revert
+        assertEq(pool.usdWei(), fb);
+        _deposit(alice, 2);                                     // deposits keep working
+        feed.set(3000e8, block.timestamp);
+        assertFalse(pool.feeUsesFallback());
     }
 
     // Audit fix: deposit → withdraw loops used to mint points for $0.50 each with nothing pooled.
@@ -124,6 +226,7 @@ contract CreditStoreTest is Test {
 
     function test_PointsCannotMove() public {
         _deposit(alice, 40); _deposit(bob, 40);
+        pool.assemble(0);
         vm.startPrank(alice);
         vm.expectRevert(CreditStore.NonTransferable.selector); store.transfer(bob, 1);
         vm.expectRevert(CreditStore.NonTransferable.selector); store.approve(bob, 1);
@@ -487,7 +590,9 @@ contract CreditStoreTest is Test {
         credits.mint(address(r), 9_999);
         uint256[] memory ids = new uint256[](1); ids[0] = 9_999;
         r.approveAndDeposit(pool, ids);
-        _fillOpen(alice);                                // its batch fills → 2 points
+        uint256 rb = pool.openBatchId();
+        _fillOpen(alice);
+        pool.assemble(rb);                               // its batch is burned → 2 points
         store.list(sid, 1);
         r.bid(1, 0.5 ether);                             // excess refund → tries to re-enter bid and settle
         assertTrue(r.attempted());
@@ -530,4 +635,8 @@ contract StoreReenterer {
         try store.bid{value: fee}(sid, 2) { reentered = true; } catch {}
         try store.settle(sid) { reentered = true; } catch {}
     }
+}
+
+contract GasBurner {
+    receive() external payable { while (true) {} }
 }

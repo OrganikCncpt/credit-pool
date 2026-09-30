@@ -10,6 +10,7 @@ import {ForkStatements, ICredits} from "../test/CreditPool.fork.t.sol";
 ///   forge script script/DeployFork.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --private-key <anvil key 0>
 contract DeployFork is Script {
     function run() external {
+        require(block.chainid == 31337, "local fork only: this wires REAL Credits to a test Statements");
         ICredits credits = ICredits(0x97630aA70AB14ed9883B41dAfccBc11349723043);
         vm.startBroadcast();
         ForkStatements stmts = new ForkStatements(credits);

@@ -7,6 +7,7 @@ export const DEPLOYMENTS = {
     pool: null, // ← CreditPool address
     deployBlock: 0n,
     explorer: "https://etherscan.io",
+    credits: "0x97630aA70AB14ed9883B41dAfccBc11349723043", // the site refuses a pool wired to anything else
   },
   11155111: {
     name: "Sepolia",

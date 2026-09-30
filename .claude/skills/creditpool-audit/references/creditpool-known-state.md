@@ -133,6 +133,19 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | CP-42 | `sweepFees` copied the fee wallet's returndata: a recipient reverting with ~3 MB ran even a 30M-gas sweep out of gas, stalling the treasury's share (verify pass 2) | Assembly call without returndata copy; `PlatformFeesHeld` event (`test_ReturndataBombCantStallTreasury`, fails on 542dccd) |
 | CP-43 | In a live no-bid auction, a majority could raise votes after it opened and the treasury bid the higher majority price (up to the owner's limit) (verify pass 2) | Treasury bids the price the auction opened at; only an auction opened by the 30-day fallback gets the majority price (`test_VoteRaiseAfterOpenDoesntRaiseTreasuryBid`, fails on 542dccd) |
 
+Full audit #3 (2026-09-30, whole system, 6 blind specialists + adversarial verify; `docs/FULL-AUDIT-3.md`):
+
+| ID | Finding | Fix |
+|---|---|---|
+| CP-44 | Points awarded at fill were kept when a batch dissolved via the escape hatch: a whale (or anyone once the Statement cap is hit) could cycle the same 80 Credits every 14 days for 160 points (M; 3 specialists; was AR-15, underrated) | Points awarded in `assemble()`, only for Credits burned into a Statement (`test_DissolvedBatchEarnsNoPoints`, `test_PointsAreTwoPerCreditWhenAssembled`) |
+| CP-45 | After 30 days a 1-slot holder could vote 1 wei, open the fallback auction and dust-bid first, locking the treasury out (`AlreadyBid`) (M) | In a fallback-opened auction the treasury outbids a bid below the majority price, at the majority price; never a bid at/above it (`test_FallbackDustBidCantLockOutTreasury`) |
+| CP-46 | Store inferred "fallback-opened" from `endsAt - 24h`, which anti-snipe extensions move: a bidding war could make a normal auction look fallback-opened and let the treasury outbid a real buyer (self-found during CP-45) | Pool records `openedByFallback[b]` when the auction opens; the store reads it (`test_BiddingWarDoesntMakeNormalAuctionLookFallback`) |
+| CP-47 | Absurd feed prices (below $10 or above $10M per ETH, or overflow-sized) priced fees off a broken feed or reverted `usdWei` (L) | Out-of-range prices are untrusted → fallback fee (`test_AbsurdFeedPricesUseFallback`) |
+| CP-48 | A gas-burning `feeRecipient` could make `sweepFees` revert with a modest gas budget, rolling back the treasury's share (I) | Fee wallet paid with a fixed 100k gas, no returndata copy (`test_GasBurningFeeWalletCantStallTreasury`) |
+| CP-49 | `sweepBidFees` reverted (and copied returndata) when the fee wallet rejects ETH (I) | Bounded no-copy call; on failure bid fees stay held (never treasury), no revert (`test_SweepBidFeesHoldsOnRejectingWallet`) |
+| CP-50 | Deploy: `DeployFork`/`DeployLocal` had no chain guard (DeployFork on mainnet wires real Credits to a test Statements); `Deploy.s.sol` accepted non-canonical Credits/feed on mainnet and an EOA / the deployer as OWNER (L) | Local scripts require chain 31337; mainnet requires canonical Credits + feed and OWNER a contract ≠ deployer; logs both pending owners (dry-runs) |
+| CP-51 | Frontend hardening (I): remote `tokenURI` images leaked viewer IPs; rejected deposit lost the selection; jump box threw on non-integers; no CSP; approval target not pinned; demo server bound to all interfaces | `data:image/` only; selection kept until each chunk lands; input validated; CSP meta; chain-1 Credits address pinned; `serve.py` on 127.0.0.1 |
+
 ## Accepted residuals (known, deliberate or out of our control)
 
 | ID | Residual | Why accepted |
@@ -149,8 +162,11 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | AR-10 | After 30 days unsold, the fallback minimum is the lowest vote cast, unweighted by slots, so one low vote sets the floor (ext. audit #1 H-03) | Owner decision: prevents a majority from blocking a sale forever (CP-4, CP-21). Everyone can outbid for 24h; the frontend warns depositors in the last 7 days before it applies |
 | AR-11 | The store owner chooses which unsold batches the treasury buys, up to `maxTreasuryBid` each; an owner who also controls a batch's majority can route treasury ETH to it | Trust assumption, documented. Bounded by the cap; raises take 3 days (CP-31); owner should be a multisig |
 | AR-12 | Deposit fee is non-monotonic at the bulk boundary (5 Credits = $10, 6 = $6) | Owner's pricing decision; the UI tips "6+ at once cost $1 each" |
-| AR-15 | A batch that fills, isn't assembled for 14 days, then dissolves keeps its points (same $0.50/point as honest depositors, Credits locked 14+ days) | Anyone can `assemble` once assembly is open; before that, points cost the same as honest ones |
 | AR-17 | If a listed Statement left the store by means outside the store's code, `settle` reverts and the winner's escrowed points stay locked | Depends on the real Statements contract (OK-list); revisit when published |
+| AR-18 | A plain `deposit` can be front-run (1 Credit, $2) to break a whale's "sole holder" status | The frontend always uses `depositAt`, pinned to the batch state the user confirmed; documented for direct callers |
+| AR-19 | A reserve vote is a standing, immediately usable minimum: anyone can `startAuction` just before a voter's raise lands | Documented in the vote tooltip: decide before voting |
+| AR-20 | `assemble` doesn't check `assemblyOpensAt` (only the escape hatch uses it) | Jack's Statements contract gates real assembly; revisit with S-1 |
+| AR-21 | Frontend `config.js` ships demo entries and is rewritten by demo scripts | Launch checklist: set chain 1 pool/deployBlock, `DEFAULT_CHAIN = 1`, drop 31337 |
 | AR-14 | The deposit that fills a batch pays for awarding points to every depositor (≤ ~2.35M gas for 80 depositors) | Measured (`test_FillAwardGas_80Depositors`); a 100-Credit deposit stays ≈ 13.1M worst case, under 2^24 |
 
 ## Open, known, blocked on the Statements contract
@@ -167,6 +183,7 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | OK-8 | Layering: Credits can be printed onto an existing Statement. `assemble`/`AssemblyVault` require exactly one NEW Statement per 80 | Confirm S-4; a layering mode needs a new custody check and a full audit (Design 3) |
 | OK-9 | Randomness inside Statements (e.g. misregistration) seeded by caller-influenced data would make `assemble` timing a lever | Confirm S-5 |
 | OK-10 | Layers may not mint, so fewer than 1,526 Statements may exist; cap guard must match real supply rules | Confirm S-6 with OK-2 |
+| OK-11 | A Statement plain-transferred into the vault plus an assembler returning that id (buggy/lying) could swap a batch's Statement; the real one stays in the vault (FA-3 NFT L-1) | S-8: tie the returned id to how Statements mints (require the mint callback, or check its counter/totalSupply) |
 
 ## Proven facts (so they are not re-litigated)
 
