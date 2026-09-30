@@ -105,55 +105,94 @@ $("example-batches").replaceChildren(...EXAMPLES.map((x) => {
   return card;
 }));
 
-// ───────── 3. sell first + backer offers ─────────
-const FLOOR = 0.0045;
-const offers = [
-  { who: "0x7a3…c1", eth: 0.44, votes: 38 },
-  { who: "0x19f…0b", eth: 0.36, votes: 9 },
-  { who: "store treasury", eth: 0.40, votes: 0 },
+// ───────── 3. backed auctions ─────────
+const FLOOR = 0.0045, MINIMUM = 0.40;
+const backings = [
+  { who: "0x7a3…c1", eth: 0.36 },
+  { who: "store treasury", eth: 0.33 },
 ];
-let accepted = null, lcEnds = 0, lcBid = 0, lcWho = "", timer = null;
-function renderOffers() {
-  $("offers").replaceChildren(...offers.map((o, idx) => {
+let phase = "full";          // full → auction → accept → sold | refunded
+let high = 0, highWho = "", ends = 0, acceptSlots = 0, timer3 = null;
+const fmtLeft = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; };
+function renderBackings() {
+  const sorted = backings.slice().sort((a, b) => b.eth - a.eth);
+  $("backings").replaceChildren(...sorted.map((o, i) => {
     const tr = document.createElement("tr");
     const per = o.eth / 80;
-    const cells = [o.who, `${o.eth.toFixed(2)} ETH`, per.toFixed(4), `${per >= FLOOR ? "+" : ""}${(((per - FLOOR) / FLOOR) * 100).toFixed(0)}%`, `${o.votes}/80`];
-    for (const c of cells) { const td = document.createElement("td"); td.textContent = c; tr.append(td); }
-    const td = document.createElement("td");
-    const btn = document.createElement("button");
-    btn.className = "ghost";
-    btn.textContent = accepted === idx ? "Accepted" : o.votes + 12 > 40 ? "Accept (your 12 slots → majority)" : "Vote to accept";
-    btn.disabled = accepted !== null;
-    btn.addEventListener("click", () => { o.votes += 12; if (o.votes > 40) startLastCall(idx); renderOffers(); });
-    td.append(btn); tr.append(td);
+    for (const c of [o.who, `${o.eth.toFixed(2)} ETH`, per.toFixed(4), `${per >= FLOOR ? "+" : ""}${(((per - FLOOR) / FLOOR) * 100).toFixed(0)}%`]) {
+      const td = document.createElement("td"); td.textContent = c; tr.append(td);
+    }
+    const td = document.createElement("td"); td.className = "muted small";
+    td.textContent = i > 0 ? "fallback"
+      : phase === "full" ? "opens the auction"
+      : o.who === highWho && phase !== "refunded" ? "committed"
+      : "outbid · refunded";
+    tr.append(td);
     return tr;
   }));
+  $("ba-start").disabled = phase !== "full" || !backings.length;
+  $("ba-back").disabled = phase !== "full";
 }
-function startLastCall(idx) {
-  accepted = idx; lcBid = offers[idx].eth; lcWho = offers[idx].who; lcEnds = Date.now() + 3600_000;
-  $("lastcall").hidden = false; $("lc-result").textContent = "";
-  clearInterval(timer); timer = setInterval(tickLastCall, 1000); tickLastCall();
+function renderAuction() {
+  $("ba-auction").hidden = phase === "full";
+  $("ba-bid").textContent = `${high.toFixed(4)} ETH`; $("ba-who").textContent = highWho;
+  $("ba-auction-actions").hidden = phase !== "auction";
+  $("ba-accept").hidden = phase !== "accept";
+  $("ba-accept-slots").textContent = String(acceptSlots);
+  $("ba-accept-bar").style.width = `${(acceptSlots / 80) * 100}%`;
+  const tags = { auction: ["auction", "Auction", "left · opened with the best backing"], accept: ["accept window", "Assembled", "left for depositors to accept (41/80)"], sold: ["sold · burned", "Settled", ""], refunded: ["refunded · not burned", "Full", ""] };
+  if (tags[phase]) { $("ba-phase").textContent = tags[phase][0]; $("ba-phase").className = `tag ${tags[phase][1]}`; $("ba-phase-note").textContent = tags[phase][2]; }
+  $("ba-tag").textContent = phase === "sold" ? "sold · burned" : phase === "auction" ? "backed · auction live" : phase === "accept" ? "backed · accept window" : "full · not burned";
+  renderBackings();
 }
-function tickLastCall() {
-  const left = Math.max(0, lcEnds - Date.now());
-  $("lc-left").textContent = `${String(Math.floor(left / 60000)).padStart(2, "0")}:${String(Math.floor(left / 1000) % 60).padStart(2, "0")}`;
-  $("lc-bid").textContent = `${lcBid.toFixed(4)} ETH`; $("lc-who").textContent = lcWho;
-  if (!left) endLastCall();
+function tick3() {
+  const left = ends - Date.now();
+  $("ba-left").textContent = phase === "sold" || phase === "refunded" ? "done" : fmtLeft(left);
+  if (left <= 0 && phase === "auction") endAuction();
+  else if (left <= 0 && phase === "accept") expire();
 }
-function endLastCall() {
-  clearInterval(timer);
-  const per = lcBid / 80;
-  $("lc-result").textContent = `Sold to ${lcWho} for ${lcBid.toFixed(4)} ETH. Burned in the same transaction; the Statement went straight to the buyer. ` +
-    `Your 12 slots: ${(per * 12).toFixed(4)} ETH to collect.`;
-  $("lc-outbid").disabled = true; $("lc-end").disabled = true;
+function finalize(price, who) {
+  phase = "sold"; clearInterval(timer3);
+  $("ba-result").textContent = `FINALIZE: burned the 80 Credits, Statement delivered to ${who}, ${price.toFixed(4)} ETH split to depositors. ` +
+    `Your 12 slots: ${((price / 80) * 12).toFixed(4)} ETH to collect.`;
+  renderAuction(); tick3();
 }
-$("lc-outbid").addEventListener("click", () => {
-  lcBid = lcBid * 1.05; lcWho = "you";
-  if (lcEnds - Date.now() < 15 * 60_000) lcEnds = Date.now() + 15 * 60_000; // anti-snipe
-  tickLastCall();
+function endAuction() {
+  if (high >= MINIMUM) return finalize(high, highWho);
+  phase = "accept"; ends = Date.now() + 24 * 3600_000; acceptSlots = 0;
+  $("ba-result").textContent = `Ended at ${high.toFixed(4)} ETH, below the 0.40 minimum. Depositors have 24h to accept it by majority.`;
+  renderAuction();
+}
+function expire() {
+  phase = "refunded"; clearInterval(timer3);
+  $("ba-result").textContent = `Not accepted in 24h: ${highWho} refunded ${high.toFixed(4)} ETH, nothing burned, the Credits are still yours. ` +
+    `Fallback backings are still posted for another round.`;
+  renderAuction(); tick3();
+}
+$("ba-back").addEventListener("click", () => {
+  const v = Number($("ba-amount").value);
+  if (!(v > 0)) return;
+  const mine = backings.find((b) => b.who === "you");
+  mine ? (mine.eth = v) : backings.push({ who: "you", eth: v });
+  renderBackings();
 });
-$("lc-end").addEventListener("click", () => { lcEnds = Date.now(); tickLastCall(); });
-renderOffers();
+$("ba-start").addEventListener("click", () => {
+  const best = backings.slice().sort((a, b) => b.eth - a.eth)[0];
+  phase = "auction"; high = best.eth; highWho = best.who; ends = Date.now() + 24 * 3600_000;
+  $("ba-result").textContent = "";
+  clearInterval(timer3); timer3 = setInterval(tick3, 1000); renderAuction(); tick3();
+});
+$("ba-outbid").addEventListener("click", () => {
+  high = high * 1.05; highWho = highWho === "you" ? "0x19f…0b" : "you";
+  if (ends - Date.now() < 15 * 60_000) ends = Date.now() + 15 * 60_000;
+  renderAuction(); tick3();
+});
+$("ba-end").addEventListener("click", () => { ends = Date.now(); tick3(); });
+$("ba-accept-vote").addEventListener("click", () => { acceptSlots = Math.min(80, acceptSlots + 12); $("ba-accept-vote").disabled = true; check(); });
+$("ba-others").addEventListener("click", () => { acceptSlots = Math.min(80, acceptSlots + 18); check(); });
+$("ba-expire").addEventListener("click", () => { ends = Date.now(); tick3(); });
+function check() { renderAuction(); if (acceptSlots > 40) finalize(high, highWho); }
+renderBackings();
 
 // ───────── 4. layering ─────────
 const layerInks = ["c"];

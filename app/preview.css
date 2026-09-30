@@ -26,3 +26,4 @@ button.pv-active { background: var(--fg); color: var(--bg); }
 .pv-offers th, .pv-offers td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
 .pv-offers th { color: var(--muted); font-weight: normal; font-size: 12px; }
 .pv-lastcall { border: 1px solid var(--m); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+[hidden] { display: none !important; }

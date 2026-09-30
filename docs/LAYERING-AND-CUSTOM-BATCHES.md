@@ -29,7 +29,7 @@ The creator sets these at creation. They are **immutable** once the first Credit
 | **Print order** | a preset (by number, grouped by colour, "misregistered", deposit order) **or** decided later by the arrangement vote (A3) | fixed before any sale |
 | **Split** | equal per Credit (only option at launch; other splits later, only if they get their own review) | at payout |
 
-The fee, 25/75 split, points, majority rules, 1-hour last call and backer offers are the same for every
+The fee, 25/75 split, points, majority rules and backed auctions (required backing, 24h accept window) are the same for every
 batch. **The creator gets no powers after creation:** no fee, no cancel, no rule changes, no priority.
 Creating costs one deposited Credit (the creator's own), which keeps spam down without a new fee.
 
@@ -52,7 +52,7 @@ Creating costs one deposited Credit (the creator's own), which keeps spam down w
 - **Default.** Without an adopted order, the batch's creation preset applies. For the open queue that is
   Credit number ascending, **never** on-chain randomness: the caller of a permissionless burn could pick
   the "random" outcome.
-- **Frozen before sale.** The order locks when an auction or last call starts, so buyers see exactly what
+- **Frozen before sale.** The order locks when the auction starts, so buyers see exactly what
   prints.
 
 ### A4. Safety
@@ -93,7 +93,7 @@ The result is one darker, richer Statement whose layers stay browsable on-chain.
 ### B2. The sale and the split
 
 - Layering follows sell first: **a layer burns only when a buyer or backer is locked in.** That means a
-  winning auction bid at the majority minimum, or a majority-accepted offer after its 1-hour last call.
+  backed auction whose high bid meets the majority minimum, or that the majority accepts within its 24h window.
   Then, in one transaction:
   1. burn the layer onto the canvas;
   2. verify it printed;
@@ -129,7 +129,7 @@ The result is one darker, richer Statement whose layers stay browsable on-chain.
 
 | Threat | Defence |
 |---|---|
-| Canvas owner pulls the canvas at the last second | Blocked while an auction or last call is live |
+| Canvas owner pulls the canvas at the last second | Blocked while an auction or accept window is live |
 | A layer printed onto the wrong Statement | Vault checks the canvas id and layer delta |
 | A canvas swapped for a lookalike | Canvas id bound to the batch and its composition nonce |
 | Owner sets absurd canvas slots | Visible before anyone deposits and fixed at opt-in; depositors choose whether to join |
