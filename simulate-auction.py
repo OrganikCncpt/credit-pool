@@ -90,7 +90,7 @@ def status(b):
         print(f"  reserve {fmt(reserve)} · high bid {fmt(high)} by {short(bidder)} · " +
               (f"ends in {left // 3600}h {left % 3600 // 60}m" if left > 0 else "ended"))
     if state == "Settled":
-        print(f"  sold for {fmt(int(call('auctions(uint256)(address,uint256,uint256,uint64)', b)[1]))} · depositors split {fmt(proceeds)} after 1%")
+        print(f"  sold for {fmt(int(call('auctions(uint256)(address,uint256,uint256,uint64)', b)[1]))} · depositors split {fmt(proceeds)} (no sale fee)")
 
 def fill(b, to=80):
     b = int(b)
@@ -99,7 +99,7 @@ def fill(b, to=80):
     need = int(to) - filled  # e.g. `fill 2 76` leaves 4 slots for a real person to complete the batch
     donor_ids = call("tokensOf(address)(uint256[])", DONOR, to=CREDITS)[0]
     rpc("anvil_impersonateAccount", DONOR); fund(DONOR)
-    fee = int(call("depositFee()(uint256)")[0])
+    usd = int(call("usdWei()(uint256)")[0])  # $1 in wei; fee is $2/Credit, $1 each for 6+
     base = 0xC0FFEE0000000000000000000000000000000000 + 1000 + b * 100
     i = 0
     while need:
@@ -109,7 +109,7 @@ def fill(b, to=80):
         ids = [donor_ids.pop(0) for _ in range(k)]
         for cid in ids: send(DONOR, "transferFrom(address,address,uint256)", DONOR, w, cid, to=CREDITS)
         send(w, "setApprovalForAll(address,bool)", POOL, "true", to=CREDITS)
-        send(w, "deposit(uint256[])", "[" + ",".join(map(str, ids)) + "]", value=(fee + fee // 20) * k)  # $1 per Credit, 5% buffer
+        send(w, "deposit(uint256[])", "[" + ",".join(map(str, ids)) + "]", value=usd * k * (1 if k >= 6 else 2) * 105 // 100)  # 5% buffer, excess refunded
         print(f"  {short(w)} deposited {k}")
     status(b)
 

@@ -37,7 +37,10 @@ donor_ids = []
 for src in SOURCES:
     sa.rpc("anvil_impersonateAccount", src); sa.fund(src)
     donor_ids += [(src, i) for i in sa.call("tokensOf(address)(uint256[])", src, to=CREDITS)[0]]
-FEE = u("depositFee()(uint256)")
+USD = u("usdWei()(uint256)")                     # $1 in wei
+fee_for = lambda k: USD * k * (1 if k >= 6 else 2)  # $2 per Credit, $1 each for 6+
+STORE = sa.call("store()(address)")[0]
+paid_fees = 0
 STATEMENTS = sa.call("statements()(address)")[0]
 FEE_WALLET = sa.call("feeRecipient()(address)")[0]
 for b in sa.BIDDERS: sa.fund(b, 1000)                                            # collectors with test ETH
@@ -50,9 +53,11 @@ def dep(w, k):
     sa.fund(w, 1)
     for src, cid in picks: sa.send(src, "transferFrom(address,address,uint256)", src, w, cid, to=CREDITS)
     sa.send(w, "setApprovalForAll(address,bool)", POOL, "true", to=CREDITS)
+    global paid_fees
     before = pool_eth()
-    sa.send(w, "deposit(uint256[])", "[" + ",".join(map(str, ids)) + "]", value=(FEE + FEE // 20) * k)
-    assert pool_eth() - before == FEE * k, "excess fee not refunded exactly"
+    sa.send(w, "deposit(uint256[])", "[" + ",".join(map(str, ids)) + "]", value=fee_for(k) * 105 // 100)
+    assert pool_eth() - before == fee_for(k), "excess fee not refunded exactly"
+    paid_fees += fee_for(k)
     deposited.setdefault(w, []).extend(ids)
     return ids
 
@@ -72,7 +77,7 @@ def claim_all(b):
         paid += got
     return proceeds, paid
 
-print(f"pool {POOL}\nfee per Credit {from_wei(FEE)} · {len(donor_ids)} real Credits available\n")
+print(f"pool {POOL}\n$1 = {from_wei(USD)} (fee $2/Credit, $1 each for 6+) · {len(donor_ids)} real Credits available\n")
 
 # ───────────── deposit phase (all at t0: the feed goes stale once time is skipped) ─────────────
 print("DEPOSITS")
@@ -84,7 +89,10 @@ E = fill_batch(43, [50, 30])                                                    
 F = fill_batch(45, [6, 4])                                                       # batch 5, filling
 ok(u("openBatchId()(uint256)") == 5, "5 full batches + 1 filling (batch #5 at 10/80)")
 total_credits = 80 * 5 + 10
-ok(u("accruedFees()(uint256)") == FEE * total_credits, f"fees = $1 × {total_credits} Credits exactly")
+ok(u("accruedFees()(uint256)") == paid_fees, f"deposit fees exact: $2/Credit under 6, $1/Credit for 6+ ({from_wei(paid_fees)})")
+pts = lambda a: u("balanceOf(address)(uint256)", a, to=STORE)
+ok(u("totalSupply()(uint256)", to=STORE) == 2 * 80 * 5, "SCREDIT: 2 points per Credit for the 5 full batches only (800); batch #5 is still filling")
+ok(all(pts(w) == 2 * len(deposited[w]) for w in A), "every batch #0 depositor holds exactly 2 × their Credits in points")
 ok(u("balanceOf(address)(uint256)", POOL, to=CREDITS) == total_credits, f"pool holds all {total_credits} Credits")
 
 # ───────────── F: withdraw while filling ─────────────
@@ -121,7 +129,7 @@ sa.skip(1)
 sa.send(sa.BIDDERS[0], "settle(uint256)", 0)
 ok(owner_of(STATEMENTS, sidA) == sa.BIDDERS[2].lower(), "Statement delivered to the winner (3.2 ETH)")
 proceeds, paid = claim_all(0)
-ok(proceeds == W(3.2) - W(3.2) // 100, "proceeds = 3.2 ETH − 1% = 3.168 ETH")
+ok(proceeds == W(3.2), "proceeds = the full 3.2 ETH (no sale fee)")
 ok(proceeds - paid < 80, f"all 20 depositors paid exactly slots/80 ({from_wei(paid)}; dust {proceeds - paid} wei)")
 for bidr in sa.BIDDERS:
     amt = u("pendingReturns(address)(uint256)", bidr)
@@ -152,7 +160,7 @@ sa.send(sa.BIDDERS[0], "assemble(uint256)", 2)
 sidC = sa.info(2)[3]
 sa.send(C[0], "redeem(uint256)", 2)
 ok(owner_of(STATEMENTS, sidC) == C[0].lower(), f"Statement #{sidC} went straight to the whale")
-ok(u("accruedFees()(uint256)") == fees_before, "no 1% fee on a redeem")
+ok(u("accruedFees()(uint256)") == fees_before, "a redeem adds no fee")
 
 # ───────────── D: majority blocks with an absurd price → 30-day fallback ─────────────
 print("\nD. 30-DAY FALLBACK (batch #3: 41 slots vs 39)")
@@ -183,14 +191,18 @@ ok(sa.info(4)[0] == "Dissolved", "batch #4 dissolved")
 # ───────────── ledger ─────────────
 print("\nLEDGER")
 sales = W(3.2) + W(1.1) + W(1.2)
-expect_fees = FEE * total_credits + sum(s // 100 for s in (W(3.2), W(1.1), W(1.2)))
-ok(u("accruedFees()(uint256)") == expect_fees, f"fees = $1 × {total_credits} Credits + 1% of {from_wei(sales)} in sales = {from_wei(expect_fees)}")
+expect_fees = paid_fees
+ok(u("accruedFees()(uint256)") == expect_fees, f"fees = deposit fees only ({from_wei(expect_fees)}); {from_wei(sales)} in sales carried no fee")
+store_before = int(sa.rpc("eth_getBalance", STORE, "latest"), 16)
 # Measure the pool side: the demo's fee wallet is anvil's default account, which also collects
 # local block fees, so its own balance isn't a clean signal.
 pool_before = pool_eth()
 sa.send(sa.BIDDERS[0], "sweepFees()")
-ok(pool_before - pool_eth() == expect_fees and u("accruedFees()(uint256)") == 0,
-   f"sweep sent exactly {from_wei(expect_fees)} to the fee wallet {sa.short(FEE_WALLET)}")
+platform_cut = expect_fees * 2500 // 10000
+ok(pool_before - pool_eth() == expect_fees and u("accruedFees()(uint256)") == 0 and u("platformFeesOwed()(uint256)") == 0,
+   f"sweep sent exactly {from_wei(expect_fees)} out of the pool")
+ok(int(sa.rpc("eth_getBalance", STORE, "latest"), 16) - store_before == expect_fees - platform_cut,
+   f"75% ({from_wei(expect_fees - platform_cut)}) to the store treasury, 25% to the fee wallet {sa.short(FEE_WALLET)}")
 ok(pool_eth() < 3 * 80, f"pool left holding only rounding dust ({pool_eth()} wei)")
 ok(u("balanceOf(address)(uint256)", POOL, to=CREDITS) == 6, "pool holds only batch #5's 6 Credits")
 burned = sum(1 for w in A + B + C + D for i in deposited[w] if owner_of(CREDITS, i) is None)
