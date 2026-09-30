@@ -148,6 +148,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     error ReserveChanged();
     error RenounceDisabled();
     error NotAContract();
+    error BadConfig();
 
     constructor(
         address credits_,
@@ -163,6 +164,11 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
                 || store_.code.length == 0) {
             revert NotAContract();
         }
+        // Mis-wiring guards in the contract itself, not only in the deploy script (external audit #2):
+        // distinct dependencies, and an opening time that can't be milliseconds-for-seconds.
+        if (credits_ == statements_ || credits_ == assembler_ || credits_ == ethUsdFeed_ || credits_ == store_
+                || statements_ == ethUsdFeed_ || statements_ == store_ || ethUsdFeed_ == store_
+                || assemblyOpensAt_ > block.timestamp + 365 days) revert BadConfig();
         credits = IERC721(credits_);
         statements = IERC721(statements_);
         assembler = IStatementAssembler(assembler_);
@@ -172,7 +178,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         if (atDeploy == 0) revert StaleOracle(); // the feed must be healthy at deploy to set the fallback
         fallbackFeeWei = atDeploy;
         assemblyOpensAt = assemblyOpensAt_;
-        if (feeRecipient_ == address(0) || feeRecipient_ == store_) revert ZeroAddress(); // the store only takes ETH from the pool
+        if (feeRecipient_ == address(0) || feeRecipient_ == store_ || feeRecipient_ == address(this)) revert ZeroAddress(); // must be able to take ETH
         feeRecipient = feeRecipient_;
         vault = new AssemblyVault(credits, statements, assembler);
         store = ICreditStore(store_);
@@ -201,15 +207,17 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     ///      it reverts, reports a non-positive price, is older than ORACLE_MAX_AGE, or is dated in
     ///      the future (external audit #1, L-03). Never reverts.
     function _liveFee() internal view returns (uint256) {
-        try ethUsdFeed.latestRoundData() returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
-            if (price <= 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > ORACLE_MAX_AGE) return 0;
-            uint256 unit = 10 ** _feedDecimals;
-            if (uint256(price) < MIN_ETH_USD * unit || uint256(price) > MAX_ETH_USD * unit) return 0;
-            // $1 / (ETH/USD)  →  wei
-            return (USD * 10 ** _feedDecimals * 1e18) / (uint256(price) * 1e8);
-        } catch {
-            return 0;
-        }
+        // Low-level call: a reverting feed OR one returning short/malformed data both mean
+        // "untrusted" (a try/catch can't catch a failed decode; external audit #2, L).
+        (bool ok, bytes memory ret) =
+            address(ethUsdFeed).staticcall(abi.encodeCall(AggregatorV3Interface.latestRoundData, ()));
+        if (!ok || ret.length < 160) return 0;
+        (, int256 price,, uint256 updatedAt,) = abi.decode(ret, (uint256, int256, uint256, uint256, uint256));
+        if (price <= 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > ORACLE_MAX_AGE) return 0;
+        uint256 unit = 10 ** _feedDecimals;
+        if (uint256(price) < MIN_ETH_USD * unit || uint256(price) > MAX_ETH_USD * unit) return 0;
+        // $1 / (ETH/USD)  →  wei
+        return (USD * 10 ** _feedDecimals * 1e18) / (uint256(price) * 1e8);
     }
 
     // ───────────────────────── deposit / withdraw ─────────────────────────
@@ -421,17 +429,45 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     }
 
     function currentReserve(uint256 b) public view returns (uint256) {
+        (uint256[] memory prices, uint256[] memory weights, uint256 voters,) = _sortedVotes(b);
+        // Walk up from the lowest vote: the reserve is the first price at which more than half
+        // of ALL 80 slots are in. Votes above it don't lower it; missing votes can't be faked.
+        uint256 cum = 0;
+        for (uint256 k = 0; k < voters; ++k) {
+            cum += weights[k];
+            if (cum * 2 > CREDITS_PER_STATEMENT) return prices[k];
+        }
+        revert ReserveQuorumNotMet();
+    }
+
+    /// @notice The slot-weighted median of the votes actually CAST (non-voters excluded).
+    ///         Equals `currentReserve` when turnout is high; differs when abstentions let one
+    ///         small voter's ask become the quorum price (external audit #2, H). The store's
+    ///         treasury only pays a price where the two agree.
+    function votedMedian(uint256 b) public view returns (uint256) {
+        (uint256[] memory prices, uint256[] memory weights, uint256 voters, uint256 votedSlots) = _sortedVotes(b);
+        uint256 cum = 0;
+        for (uint256 k = 0; k < voters; ++k) {
+            cum += weights[k];
+            if (cum * 2 > votedSlots) return prices[k];
+        }
+        revert ReserveQuorumNotMet(); // nobody voted
+    }
+
+    /// @dev Cast votes sorted by price (insertion sort, at most 80 depositors), with slot weights.
+    function _sortedVotes(uint256 b)
+        internal
+        view
+        returns (uint256[] memory prices, uint256[] memory weights, uint256 voters, uint256 votedSlots)
+    {
         address[] storage ds = _batches[b].depositors;
         uint256 n = ds.length;
-        uint256[] memory prices = new uint256[](n);
-        uint256[] memory weights = new uint256[](n);
-        uint256 voters = 0;
-        uint256 votedSlots = 0;
+        prices = new uint256[](n);
+        weights = new uint256[](n);
         for (uint256 i; i < n; ++i) {
             uint256 p = reservePref[b][ds[i]];
             if (p == 0) continue;
             uint256 w = slots[b][ds[i]];
-            // insertion sort by price
             uint256 j = voters;
             while (j > 0 && prices[j - 1] > p) {
                 prices[j] = prices[j - 1];
@@ -443,14 +479,6 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
             ++voters;
             votedSlots += w;
         }
-        // Walk up from the lowest vote: the reserve is the first price at which more than half
-        // of ALL 80 slots are in. Votes above it don't lower it; missing votes can't be faked.
-        uint256 cum = 0;
-        for (uint256 k = 0; k < voters; ++k) {
-            cum += weights[k];
-            if (cum * 2 > CREDITS_PER_STATEMENT) return prices[k];
-        }
-        revert ReserveQuorumNotMet();
     }
 
     function bid(uint256 b) external payable nonReentrant {
@@ -458,6 +486,8 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         Auction storage a = auctions[b];
         if (block.timestamp >= a.endsAt) revert WrongBatchState();
         uint256 minBid = a.reserve;
+        // At least 1 wei per slot, so no depositor's share can round to zero (external audit #2).
+        if (minBid < CREDITS_PER_STATEMENT) minBid = CREDITS_PER_STATEMENT;
         if (a.highBidder != address(0)) {
             uint256 step = (a.highBid * MIN_BID_INCREMENT_BPS) / 10_000;
             minBid = a.highBid + (step == 0 ? 1 : step); // tiny bids still have to go up
@@ -516,7 +546,7 @@ contract CreditPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     // ───────────────────────── platform fee ─────────────────────────
 
     function setFeeRecipient(address r) external onlyOwner {
-        if (r == address(0) || r == address(store)) revert ZeroAddress(); // the store only takes ETH from the pool
+        if (r == address(0) || r == address(store) || r == address(this) || r == address(vault)) revert ZeroAddress(); // must be able to take ETH
         feeRecipient = r;
         emit FeeRecipientSet(r);
     }

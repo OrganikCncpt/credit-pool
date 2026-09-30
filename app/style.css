@@ -138,6 +138,6 @@ body.sending .batch button, body.sending #deposit, body.sending #collect-all, bo
 }
 .next.warn { border-left-color: var(--warn); color: var(--fg); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 /* SCREDIT points badge */
-.points { font-size: 12px; border: 1px solid var(--line); padding: 3px 8px; cursor: help; }
+.points { font-size: 12px; border: 1px solid var(--line); padding: 3px 8px; cursor: help; white-space: nowrap; }
 .store-card .row { margin-top: 6px; }
 .store-card input { width: 90px; }

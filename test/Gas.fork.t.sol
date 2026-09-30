@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import {CreditPool} from "../src/CreditPool.sol";
 import {deployPool} from "./DeployPool.sol";
+import {ICredits, ForkStatements} from "./CreditPool.fork.t.sol";
 
 interface ICr { function tokensOf(address) external view returns (uint256[] memory); function ownerOf(uint256) external view returns (address); function setApprovalForAll(address,bool) external; }
 
@@ -14,7 +15,8 @@ contract GasForkTest is Test {
         ICr c = ICr(0x97630aA70AB14ed9883B41dAfccBc11349723043);
         address holder = c.ownerOf(1); // biggest wallet
         uint256[] memory owned = c.tokensOf(holder);
-        CreditPool pool = deployPool(address(c), address(c), address(c), 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419, block.timestamp, address(this));
+        ForkStatements st = new ForkStatements(ICredits(address(c))); // a real stand-in: the pool refuses Statements == Credits
+        CreditPool pool = deployPool(address(c), address(st), address(st), 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419, block.timestamp, address(this));
         vm.deal(holder, 1 ether);
         vm.prank(holder); c.setApprovalForAll(address(pool), true);
         uint256[5] memory sizes = [uint256(1), 10, 50, 80, 160];

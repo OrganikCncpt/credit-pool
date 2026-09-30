@@ -444,16 +444,18 @@ contract EthCustodyUnitTest is Test {
         (, , uint256 reserve,) = pool.auctions(b);
         assertEq(reserve, 0);
         vm.prank(b1); vm.expectRevert(CreditPool.BidTooLow.selector); pool.bid{value: 0}(b);
-        vm.prank(b1); pool.bid{value: 1}(b);
-        // FIXED (audit N9): below 20 wei the 5% step rounds to 0; an equal bid no longer outbids
-        vm.prank(b2); vm.expectRevert(CreditPool.BidTooLow.selector); pool.bid{value: 1}(b);
-        vm.prank(b2); pool.bid{value: 2}(b);
-        assertEq(pool.pendingReturns(b1), 1);
+        // External audit #2: the first bid is at least 1 wei per slot, so no share rounds to 0.
+        vm.prank(b1); vm.expectRevert(CreditPool.BidTooLow.selector); pool.bid{value: 79}(b);
+        vm.prank(b1); pool.bid{value: 80}(b);
+        // FIXED (audit N9): an equal bid never outbids; +5% of 80 = 84
+        vm.prank(b2); vm.expectRevert(CreditPool.BidTooLow.selector); pool.bid{value: 80}(b);
+        vm.prank(b2); pool.bid{value: 84}(b);
+        assertEq(pool.pendingReturns(b1), 80);
         vm.warp(block.timestamp + 1 days);
         pool.settle(b);
         (,,,, uint256 proceeds,) = pool.batchInfo(b);
-        assertEq(proceeds, 2);           // fee floor(2/100)=0
-        vm.prank(alice); pool.claim(b);  // floor(2*40/80) = 1
+        assertEq(proceeds, 84);
+        vm.prank(alice); pool.claim(b);  // 84*40/80 = 42, bob 31, carol 10
         vm.prank(bob); pool.claim(b);
         vm.prank(carol); pool.claim(b);
         vm.prank(b1); pool.withdrawRefund();

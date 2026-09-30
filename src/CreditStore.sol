@@ -13,6 +13,7 @@ interface ICreditPool {
     function unsoldAuctions(uint256 b) external view returns (uint256);
     function store() external view returns (address);
     function currentReserve(uint256 b) external view returns (uint256);
+    function votedMedian(uint256 b) external view returns (uint256);
     function openedByFallback(uint256 b) external view returns (bool);
     function startAuction(uint256 b) external;
     function auctions(uint256 b) external view returns (address highBidder, uint256 highBid, uint256 reserve, uint64 endsAt);
@@ -26,8 +27,8 @@ interface ICreditPool {
 
 /// @title credit.pool store
 /// @notice Three things, all funded by the pool's deposit fees:
-///         1. SCREDIT ("Store Credit"): non-transferable points. When a batch fills, the pool
-///            awards each depositor 2 per Credit in it. They can't be sent, sold or approved;
+///         1. SCREDIT ("Store Credit"): non-transferable points. When a batch is burned into a
+///            Statement, the pool awards each depositor 2 per Credit in it. They can't be sent, sold or approved;
 ///            they can only be bid here.
 ///         2. The treasury: 75% of every deposit fee. Its only outflow is buyUnsold: an
 ///            owner-triggered opening bid, at the depositors' majority-voted minimum, on a batch
@@ -46,6 +47,7 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     mapping(address => uint256) public balanceOf;  // the store's own balance = points escrowed in live bids
 
     // ───────────────────────── store auction ─────────────────────────
+    uint256 public constant FEE_CALL_GAS = 100_000;      // gas given to the fee wallet (same as the pool)
     uint256 public constant BID_FEE_CENTS = 25;         // $0.25 in ETH per bid, to the platform
     uint256 public constant AUCTION_DURATION = 24 hours;
     uint256 public constant AUCTION_EXTENSION = 15 minutes;
@@ -76,12 +78,16 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     event StoreBid(uint256 indexed statementId, address indexed bidder, uint256 points, uint256 fee, uint64 endsAt);
     event StoreSettled(uint256 indexed statementId, address winner, uint256 points);
     event BidFeesSwept(address indexed to, uint256 amount);
+    event BidFeesHeld(address indexed to, uint256 amount);
 
     error NonTransferable();
     error NotPool();
     error PoolAlreadySet();
     error NotUnsold();
     error PriceMoved();
+    error PivotalMinority();
+    error NotDepositor();
+    error LengthMismatch();
     error AlreadyBid();
     error WrongPool();
     error OverCap();
@@ -116,9 +122,10 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
 
     // ───────────────────────── points ─────────────────────────
 
-    /// @notice Called by the pool when a batch fills: each depositor's points for that batch.
+    /// @notice Called by the pool when a batch is assembled: each depositor's points for that batch.
     function award(address[] calldata to, uint256[] calldata points) external {
         if (msg.sender != address(pool)) revert NotPool();
+        if (to.length != points.length) revert LengthMismatch();
         for (uint256 i; i < to.length; ++i) {
             balanceOf[to[i]] += points[i];
             totalSupply += points[i];
@@ -173,9 +180,12 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
     ///         `maxAmount` is the owner's price limit: if votes changed before this lands, it
     ///         reverts instead of overpaying. Anyone can outbid the treasury for 24 hours; the
     ///         refund comes back via collectRefund.
-    function buyUnsold(uint256 b, uint256 maxAmount) external onlyOwner nonReentrant {
+    function buyUnsold(uint256 b, uint256 expectedAmount) external onlyOwner nonReentrant {
         if (pool.unsoldAuctions(b) == 0) revert NotUnsold();
-        (uint8 state,,,,,) = pool.batchInfo(b);
+        (uint8 state,, uint256 depositors,,,) = pool.batchInfo(b);
+        // Never buy from a sole 80-slot holder, whichever way their auction was opened (they can
+        // redeem; external audit #2, L).
+        if (depositors == 1) revert NotDepositor();
         if (state == 2) pool.startAuction(b); // sole-holder batches revert here
         else if (state != 3) revert NotUnsold();
         (address high, uint256 highBid, uint256 reserve,) = pool.auctions(b);
@@ -190,7 +200,13 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
         // treasury at the majority price, so the majority's price stays the floor.
         if (high != address(0) && (!fallbackOpen || highBid >= amount)) revert AlreadyBid();
         if (amount == 0 || amount < reserve) revert PriceMoved();
-        if (amount > maxAmount) revert PriceMoved();
+        // Exact price pin: the owner passes the price they reviewed; ANY change since reverts
+        // (external audit #2, M).
+        if (amount != expectedAmount) revert PriceMoved();
+        // Only a price the voters themselves back: it must equal the median of the votes actually
+        // cast, so abstentions can't let one small voter's ask become the treasury's price
+        // (external audit #2, H).
+        if (amount != pool.votedMedian(b)) revert PivotalMinority();
         if (amount > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
         pool.bid{value: amount}(b); // reverts if that live auction already ended
         emit TreasuryBid(b, amount);
@@ -279,9 +295,11 @@ contract CreditStore is ReentrancyGuard, Ownable2Step {
         bidFees = 0; // effects first: treasuryBalance() stays exact even during the call
         bool paid;
         // Same as the pool's sweep: bounded gas, no returndata copy.
-        assembly ("memory-safe") { paid := call(100000, to, amt, 0, 0, 0, 0) }
+        uint256 gasForRecipient = FEE_CALL_GAS;
+        assembly ("memory-safe") { paid := call(gasForRecipient, to, amt, 0, 0, 0, 0) }
         if (!paid) {
             bidFees = amt; // held for a later sweep
+            emit BidFeesHeld(to, amt);
             return;
         }
         emit BidFeesSwept(to, amt);

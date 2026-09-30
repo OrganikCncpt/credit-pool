@@ -38,7 +38,7 @@ contract Deploy is Script {
         require(feeRecipient != address(0), "FEE_RECIPIENT is zero");
         (, int256 price,, uint256 updatedAt,) = AggregatorV3Interface(feed).latestRoundData();
         require(AggregatorV3Interface(feed).decimals() == 8, "feed decimals != 8");
-        require(price > 0 && block.timestamp - updatedAt < 1 days, "feed stale or broken");
+        require(price > 0 && updatedAt <= block.timestamp && block.timestamp - updatedAt < 1 hours + 10 minutes, "feed stale or broken");
         require(opensAt + 30 days > block.timestamp, "ASSEMBLY_OPENS_AT looks wrong (over 30 days ago)");
         require(opensAt < block.timestamp + 90 days, "ASSEMBLY_OPENS_AT looks wrong (over 90 days ahead; ms instead of s?)");
         require(owner != address(0), "OWNER is zero");

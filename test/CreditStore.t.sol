@@ -132,7 +132,7 @@ contract CreditStoreTest is Test {
         vm.warp(block.timestamp + 31 days);
         vm.prank(carol); pool.setReserve(b, 1);               // 5 slots vote 1 wei
         vm.prank(carol); pool.startAuction(b);                // fallback opens at 1 wei
-        vm.prank(eve); pool.bid{value: 1}(b);                 // dust bid first
+        vm.prank(eve); pool.bid{value: 80}(b);                // dust bid first (the 80-wei floor)
         store.buyUnsold(b, 0.002 ether);
         (address hb, uint256 hbid,,) = pool.auctions(b);
         assertEq(hb, address(store));
@@ -396,10 +396,14 @@ contract CreditStoreTest is Test {
         vm.prank(alice); pool.setReserve(b, 0.002 ether);
         vm.prank(bob); pool.setReserve(b, 0.002 ether);
         pool.startAuction(b);                                 // opens at 0.002
-        vm.prank(alice); pool.setReserve(b, 0.001 ether);   // votes drop afterwards
-        vm.prank(bob); pool.setReserve(b, 0.001 ether);
-        vm.expectRevert(CreditStore.PriceMoved.selector);   // above the owner's limit
+        vm.expectRevert(CreditStore.PriceMoved.selector);   // not the price the owner reviewed
         store.buyUnsold(b, 0.001 ether);
+        vm.prank(alice); pool.setReserve(b, 0.001 ether);   // votes drop after the open:
+        vm.prank(bob); pool.setReserve(b, 0.001 ether);     // 0.002 is no longer what voters back
+        vm.expectRevert(CreditStore.PivotalMinority.selector);
+        store.buyUnsold(b, 0.002 ether);
+        vm.prank(alice); pool.setReserve(b, 0.002 ether);   // backed again
+        vm.prank(bob); pool.setReserve(b, 0.002 ether);
         store.buyUnsold(b, 0.002 ether);
         (, uint256 hbid,,) = pool.auctions(b);
         assertEq(hbid, 0.002 ether);
@@ -412,10 +416,12 @@ contract CreditStoreTest is Test {
         pool.startAuction(b);                                 // opens at 0.001
         vm.prank(alice); pool.setReserve(b, 0.0025 ether);  // majority raises after the open
         vm.prank(bob); pool.setReserve(b, 0.0025 ether);
-        store.buyUnsold(b, 1 ether);                         // even with a loose limit
-        (address hb, uint256 hbid,,) = pool.auctions(b);
-        assertEq(hb, address(store));
-        assertEq(hbid, 0.001 ether);                          // the price it opened at
+        vm.expectRevert(CreditStore.PriceMoved.selector);    // never at the raised price
+        store.buyUnsold(b, 0.0025 ether);
+        vm.expectRevert(CreditStore.PivotalMinority.selector); // nor at the opening price voters left
+        store.buyUnsold(b, 0.001 ether);
+        (address hb,,,) = pool.auctions(b);
+        assertEq(hb, address(0));                             // the treasury never overpaid
     }
 
     function test_NoVotesNoPurchase() public {
@@ -448,11 +454,11 @@ contract CreditStoreTest is Test {
         _fundTreasury(); // 0.003 ETH treasury
         (uint256 b,) = _unsold(0.01 ether);
         vm.expectRevert(CreditStore.OverCap.selector); // over the treasury balance
-        store.buyUnsold(b, 1 ether);
+        store.buyUnsold(b, 0.01 ether);
         store.setMaxTreasuryBid(0.0001 ether);
         (uint256 b2,) = _unsold(0.001 ether);
         vm.expectRevert(CreditStore.OverCap.selector); // over the cap
-        store.buyUnsold(b2, 1 ether);
+        store.buyUnsold(b2, 0.001 ether);
     }
 
     function test_TreasuryOnlyOpens_AnyoneCanOutbid_RefundComesBack() public {

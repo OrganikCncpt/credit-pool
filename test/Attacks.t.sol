@@ -132,7 +132,7 @@ contract AttacksTest is Test {
         pool.assemble(0);
         vm.prank(alice); pool.setReserve(0, 1 wei);
         pool.startAuction(0); // bob can't react: alice alone is quorum
-        vm.prank(alice); pool.bid{value: 1 wei}(0);
+        vm.prank(alice); pool.bid{value: 80 wei}(0);      // the lowest possible opening bid
         vm.prank(bob); pool.bid{value: 5 ether}(0); // bob defends
         vm.warp(block.timestamp + 25 hours);
         pool.settle(0);
@@ -248,7 +248,7 @@ contract AttacksTest is Test {
     /// Fuzz the payout: no sale fee, claims never exceed the price, dust stays < 80 wei.
     function testFuzz_ClaimsNeverExceedProceeds(uint8 a, uint96 price) public {
         uint256 na = bound(a, 1, 79);
-        price = uint96(bound(price, 1, 1_000_000 ether));
+        price = uint96(bound(price, 80, 1_000_000 ether)); // first bid ≥ 1 wei per slot
         _deposit(alice, na); _deposit(bob, 80 - na); pool.assemble(0);
         vm.prank(alice); pool.setReserve(0, 1);
         vm.prank(bob); pool.setReserve(0, 1);

@@ -38,12 +38,14 @@ Revenue: a deposit fee of $2 per Credit ($1 each for 6+ at once), swept (permiss
 
 ## 2. Scope
 
-Current: tag **`audit-prep-3`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-3.
+Current: tag **`audit-prep-4`**, https://github.com/OrganikCncpt/credit-pool/tree/audit-prep-4
+(external audit #2's fixes on top of `audit-prep-3`; see `docs/EXTERNAL-AUDIT-2-TRIAGE.md`).
 It adds `CreditStore` (SCREDIT points, treasury, store auction), the tiered deposit fee and the
 removed sale fee. Everything since external audit #1 has had internal reviews only:
 `docs/STORE-AUDIT.md` and `docs/FULL-AUDIT-3.md`.
 Previously audited externally: tag `audit-prep-1` (commit `30d172a`); fixes at `audit-prep-2`
-(`docs/EXTERNAL-AUDIT-1-TRIAGE.md`).
+(`docs/EXTERNAL-AUDIT-1-TRIAGE.md`). External audit #2 ran on `audit-prep-3`; triage and fixes:
+`docs/EXTERNAL-AUDIT-2-TRIAGE.md`.
 
 | File | nSLOC | Notes |
 |---|---:|---|
@@ -69,7 +71,7 @@ Dependencies: OpenZeppelin Contracts **v5.7.0** (`ReentrancyGuard`, `Ownable2Ste
 | Depositor | deposit / withdraw own Credits while Filling; vote; claim own share | No |
 | Bidder | bid; withdraw own refunds | No |
 | Anyone | assemble a full batch; start / settle auctions; sweep fees to `feeRecipient` | No |
-| Owner | `setFeeRecipient` only (two-step ownership; `renounceOwnership` disabled) | Minimal: cannot touch Credits, Statements, bids or proceeds |
+| Owner | `setFeeRecipient` only (two-step ownership; `renounceOwnership` disabled) | Minimal: cannot touch Credits, bids or proceeds, or Statements held by the pool (the store owner's discretion over treasury-held Statements is AR-11/AR-25) |
 | Statements contract (`assembler`, immutable) | burns the 80 Credits the vault holds during one `assemble` call | **Trusted to mint a Statement**, but custody does not depend on it (see invariant C3) |
 | Chainlink ETH/USD (immutable) | prices the $1 fee | Trusted for the fee only; if it is stale or down, deposits use `fallbackFeeWei` (frozen at deploy) instead of stopping |
 
@@ -132,7 +134,7 @@ contract is published, confirm:
 
 ```bash
 forge build
-forge test                                                        # 154 local tests
+forge test                                                        # 164 local tests
 MAINNET_RPC=<rpc> forge test --match-contract Fork                # real Credits on a mainnet fork
 forge coverage --no-match-contract Fork --no-match-path "test/custody/NftCustody.t.sol" --report summary
 ```

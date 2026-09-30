@@ -117,7 +117,7 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 
 | ID | Finding | Fix |
 |---|---|---|
-| CP-29 | `buyUnsold` read the reserve at execution and could join a live auction: depositors (>40 slots, or anyone after 30 days) front-run to make the treasury pay up to the cap (M) | `buyUnsold(b, maxAmount)`: price = `currentReserve` (majority), `PriceMoved` above the owner's limit; opens via `startAuctionAt` (batch Assembled) or bids into a live no-bid auction only if it opened at that same minimum (`AlreadyBid` if anyone bid) |
+| CP-29 | `buyUnsold` read the reserve at execution and could join a live auction: depositors (>40 slots, or anyone after 30 days) front-run to make the treasury pay up to the cap (M) | `buyUnsold(b, maxAmount)`: price = `currentReserve` (majority), `PriceMoved` above the owner's limit; opens via `startAuction` (batch Assembled) or bids into a live no-bid auction (see CP-45/46/52/53 for the current pricing rules) |
 | CP-30 | Treasury could open at 1 wei via the 30-day lowest-vote fallback / no votes (L) | Same fix: `currentReserve` reverts without quorum; `startAuctionAt` reverts when the fallback minimum differs |
 | CP-31 | Owner could raise the cap instantly and self-deal the treasury (M, trust) | Raising `maxTreasuryBid` is delayed 3 days (lowering immediate, cancels a pending raise); initial cap in the constructor (0 on mainnet). Residual trust: AR-11 |
 | CP-32 | SCREDIT farmable via deposit→withdraw loops at $0.50/point with nothing pooled (L-M) | Points awarded only when a batch fills (`_awardPoints`), 2 × slots, one `store.award(address[],uint256[])` call |
@@ -146,6 +146,18 @@ Full audit #3 (2026-09-30, whole system, 6 blind specialists + adversarial verif
 | CP-50 | Deploy: `DeployFork`/`DeployLocal` had no chain guard (DeployFork on mainnet wires real Credits to a test Statements); `Deploy.s.sol` accepted non-canonical Credits/feed on mainnet and an EOA / the deployer as OWNER (L) | Local scripts require chain 31337; mainnet requires canonical Credits + feed and OWNER a contract ≠ deployer; logs both pending owners (dry-runs) |
 | CP-51 | Frontend hardening (I): remote `tokenURI` images leaked viewer IPs; rejected deposit lost the selection; jump box threw on non-integers; no CSP; approval target not pinned; demo server bound to all interfaces | `data:image/` only; selection kept until each chunk lands; input validated; CSP meta; chain-1 Credits address pinned; `serve.py` on 127.0.0.1 |
 
+External audit #2 (on `audit-prep-3`; `docs/EXTERNAL-AUDIT-2-TRIAGE.md`):
+
+| ID | Finding | Fix |
+|---|---|---|
+| CP-52 | Treasury trusted `currentReserve`, which a tiny pivotal voter sets when the majority abstains (ext. H, re-scoped M) | `votedMedian(b)` (median of cast votes); `buyUnsold` reverts `PivotalMinority` unless the price equals it |
+| CP-53 | `buyUnsold` took a ceiling, not the reviewed price (ext. M1) | Parameter is `expectedAmount`; any difference reverts `PriceMoved` |
+| CP-54 | A 1-wei winning bid rounded every claim to 0 (ext. M3) | First bid ≥ 80 wei (1 wei per slot) |
+| CP-55 | Sole-holder guard skipped in `buyUnsold` when the holder opened their own auction (ext. L2) | Explicit `depositors == 1` check on every branch |
+| CP-56 | Constructor accepted duplicate dependency addresses / unbounded `assemblyOpensAt` (ext. L3) | `BadConfig` |
+| CP-57 | `_liveFee` reverted on malformed feed return data (ext. L7) | Low-level staticcall; short or failed data → fallback |
+| CP-58 | Info set (ext. I-2, I-6, I-9, I-12): award lengths, silent bid-fee hold, fee recipient = pool/vault, deploy feed-check underflow | `LengthMismatch`; `BidFeesHeld` + `FEE_CALL_GAS`; rejected; `updatedAt <= now`, 70-minute freshness |
+
 ## Accepted residuals (known, deliberate or out of our control)
 
 | ID | Residual | Why accepted |
@@ -167,6 +179,10 @@ Full audit #3 (2026-09-30, whole system, 6 blind specialists + adversarial verif
 | AR-19 | A reserve vote is a standing, immediately usable minimum: anyone can `startAuction` just before a voter's raise lands | Documented in the vote tooltip: decide before voting |
 | AR-20 | `assemble` doesn't check `assemblyOpensAt` (only the escape hatch uses it) | Jack's Statements contract gates real assembly; revisit with S-1 |
 | AR-21 | Frontend `config.js` ships demo entries and is rewritten by demo scripts | Launch checklist: set chain 1 pool/deployBlock, `DEFAULT_CHAIN = 1`, drop 31337 |
+| AR-22 | The treasury can't defend a batch's first auction or a no-quorum fallback auction (ext. M2) | By design: buyer of last resort at a majority-backed price only; sell-first removes the fallback |
+| AR-23 | After the 14-day escape delay one depositor can dissolve a Full batch (ext. L4) | By design (assembly is permissionless for all 14 days); sell-first replaces it |
+| AR-24 | Anti-snipe extensions are unbounded (ext. L6) | Standard English auction; each extension costs +5% and raises proceeds |
+| AR-25 | Store owner can list treasury Statements at any reserve and bid via another wallet (ext. L1) | Owner trust (AR-11); docs no longer claim the owner "cannot take Statements" |
 | AR-14 | The deposit that fills a batch pays for awarding points to every depositor (≤ ~2.35M gas for 80 depositors) | Measured (`test_FillAwardGas_80Depositors`); a 100-Credit deposit stays ≈ 13.1M worst case, under 2^24 |
 
 ## Open, known, blocked on the Statements contract
@@ -184,6 +200,7 @@ Full audit #3 (2026-09-30, whole system, 6 blind specialists + adversarial verif
 | OK-9 | Randomness inside Statements (e.g. misregistration) seeded by caller-influenced data would make `assemble` timing a lever | Confirm S-5 |
 | OK-10 | Layers may not mint, so fewer than 1,526 Statements may exist; cap guard must match real supply rules | Confirm S-6 with OK-2 |
 | OK-11 | A Statement plain-transferred into the vault plus an assembler returning that id (buggy/lying) could swap a batch's Statement; the real one stays in the vault (FA-3 NFT L-1) | S-8: tie the returned id to how Statements mints (require the mint callback, or check its counter/totalSupply) |
+| OK-12 | `settle` has no recovery if Statement delivery reverts (ext. L8) | Statements-dependent; sell-first's atomic finalize/unwind; check S-4/S-8 |
 
 ## Proven facts (so they are not re-litigated)
 
