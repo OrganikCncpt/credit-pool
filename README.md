@@ -38,6 +38,7 @@ The store (`src/CreditStore.sol`):
 Attack tests: `test/Attacks.t.sol`. Invariant fuzzing: `test/Invariant.t.sol`.
 Store and fee-change review (2026-09-28): `docs/STORE-AUDIT.md` (CP-29..43, AR-11..17).
 Statements design (order, colour, layering): `docs/STATEMENTS-DESIGN.md`.
+Next core model, not built yet (sell first, burn second, with backer offers): `docs/SELL-FIRST-DESIGN.md`.
 
 | Finding | Status |
 |---|---|
