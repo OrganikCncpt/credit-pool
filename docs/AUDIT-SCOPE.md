@@ -119,6 +119,12 @@ contract is published, confirm:
 5. It burns rather than escrows Credits (`AssemblyVault._burned` assumes `ownerOf` reverts).
 6. Statement transfers aren't restricted in a way that breaks `redeem` / `settle`.
 7. Cap behaviour (1,526 Statements): add a deposit guard so batches can't fill after the cap.
+8. **Order and colour decide the print** (Jack, Sep 27). Confirm how order maps to the output and
+   whether the call takes an order/direction parameter; the planned arrangement vote passes an ordered
+   list checked to be exactly the batch's 80 ids. See `docs/STATEMENTS-DESIGN.md`.
+9. **Layering** onto existing Statements: who may layer, whether a layer mints, and how it affects the
+   vault's "exactly one new Statement" check.
+10. Any randomness inside Statements must not be influenced by the (permissionless) `assemble` caller.
 
 ## 7. Build, test, analyze
 

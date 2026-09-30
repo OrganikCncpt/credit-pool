@@ -36,7 +36,8 @@ The store (`src/CreditStore.sol`):
 
 ## Security review (self-audit, not a substitute for a real one)
 Attack tests: `test/Attacks.t.sol`. Invariant fuzzing: `test/Invariant.t.sol`.
-Store and fee-change review (2026-09-28): `docs/STORE-AUDIT.md` (CP-29..39, AR-11..17).
+Store and fee-change review (2026-09-28): `docs/STORE-AUDIT.md` (CP-29..43, AR-11..17).
+Statements design (order, colour, layering): `docs/STATEMENTS-DESIGN.md`.
 
 | Finding | Status |
 |---|---|
@@ -142,6 +143,9 @@ python3 serve.py                          # http://localhost:5173/?as=<your addr
 1. Swap `IStatementAssembler` in `src/CreditPool.sol` for the real call. Mirror it in `test/Mocks.sol` and `ForkStatements` in the fork test.
    - If Statements exposes a supply or cap, make `deposit` revert once the cap is hit (open finding above).
    - If it rejects contract callers, the pool can't work. Check this first.
+   - Work through the S-1..S-7 checklist in `docs/STATEMENTS-DESIGN.md` (print order, colour, layering,
+     internal randomness), then build the arrangement vote (Design 1) so pooled Statements aren't
+     locked into the accidental "random" deposit order.
 2. `forge test` + the fork test.
 3. `STATEMENTS=0x.. ASSEMBLER=0x.. FEE_RECIPIENT=0x.. ASSEMBLY_OPENS_AT=<unix> forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC --account deployer --broadcast --verify`
 4. Put the pool address and deploy block in `app/config.js` under chain `1`, and set `DEFAULT_CHAIN = 1`.

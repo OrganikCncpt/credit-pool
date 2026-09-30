@@ -162,6 +162,11 @@ Store review (2026-09-28, diff review of the fee change + `CreditStore`; `docs/S
 | OK-3 | Statements may reject contract callers, require an X-account signature, cap per address, or mint to `tx.origin` | Any of these breaks assembly; must be checked the day it is published |
 | OK-4 | `ASSEMBLY_OPENS_AT` must equal real assembly opening; too early lets full batches dissolve before they can be assembled | Deploy-time parameter (script now bounds it) |
 | OK-5 | Statements transfer restrictions (soulbound period, allowlist) would brick `redeem` / `settle` | Check the day it is published |
+| OK-6 | Print order and Credit colour decide the Statement's look (Jack, Sep 27: "behaves like a printer"). The pool burns in deposit order, shuffled by withdraw's swap-and-pop, so every pooled Statement is effectively "random" | Planned: arrangement vote + fixed default order (`docs/STATEMENTS-DESIGN.md` Design 1). Not a custody issue |
+| OK-7 | Real function may take an order/direction parameter the placeholder can't pass | Confirm S-1/S-2; decide via depositor vote, never on-chain randomness (the permissionless `assemble` caller would pick it) |
+| OK-8 | Layering: Credits can be printed onto an existing Statement. `assemble`/`AssemblyVault` require exactly one NEW Statement per 80 | Confirm S-4; a layering mode needs a new custody check and a full audit (Design 3) |
+| OK-9 | Randomness inside Statements (e.g. misregistration) seeded by caller-influenced data would make `assemble` timing a lever | Confirm S-5 |
+| OK-10 | Layers may not mint, so fewer than 1,526 Statements may exist; cap guard must match real supply rules | Confirm S-6 with OK-2 |
 
 ## Proven facts (so they are not re-litigated)
 
