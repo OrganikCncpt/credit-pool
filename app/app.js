@@ -179,8 +179,11 @@ const el = (tag, attrs = {}, ...kids) => {
   for (const k of kids.flat()) if (k != null && k !== false) n.append(k);
   return n;
 };
-const eth = (wei, dp = 4) => {
-  if (wei > 0n && wei < 10n ** BigInt(18 - dp)) return `<0.${"0".repeat(dp - 1)}1 ETH`;
+const eth = (wei, dp) => {
+  dp ??= wei < 10n ** 17n ? 6 : 4; // payouts and test amounts under 0.1 ETH get more digits
+  if (wei > 0n && wei < 10n ** BigInt(18 - dp) / 2n) return `<0.${"0".repeat(dp - 1)}1 ETH`;
+  const unit = 10n ** BigInt(18 - dp);
+  wei = ((wei + unit / 2n) / unit) * unit; // round to dp, don't cut off
   const [i, f = ""] = formatEther(wei).split(".");
   const t = f.slice(0, dp).replace(/0+$/, "");
   return `${i}${t ? "." + t : ""} ETH`;
@@ -995,13 +998,14 @@ async function batchCard(b, mineOnly = false) {
   const card = el("div", { class: "batch" },
     el("div", { class: "batch-top" }, el("b", {}, `Batch #${b}`), el("span", { class: `tag ${state}` }, tagText)),
     nextStep({ state, filled, escape, noReserve, tally, reserve, slots, me, pref, highBid, endsAt, claimed, proceeds, assembledAt, sole: depositors === 1n }),
+    // The next thing to do sits right under the status line, not below the art and details.
+    actions.childElementCount ? actions : null,
     el("div", { class: "bar", title: `${filled}/80` }, el("i", { style: `width:${(Number(filled) / 80) * 100}%` })),
     el("span", { class: "muted small" }, `${filled}/80 Credits`),
     mosaic,
     kv,
     bids?.length ? bidList(bids, highBidder, me) : null,
     who,
-    actions.childElementCount ? actions : null,
   );
   S.cards.set(cacheKey, { sig, el: card });
   return card;
@@ -1011,7 +1015,8 @@ async function batchCard(b, mineOnly = false) {
 // A few RPC calls at a time, so 80-Credit mosaics don't flood public nodes.
 const limit = (() => {
   let active = 0; const q = [];
-  const next = () => { if (active >= 24 || !q.length) return; active++; const [fn, ok, no] = q.shift(); fn().then(ok, no).finally(() => { active--; next(); }); };
+  // Newest request first: art for whatever just scrolled into view jumps ahead of older, off-screen work.
+  const next = () => { if (active >= 24 || !q.length) return; active++; const [fn, ok, no] = q.pop(); fn().then(ok, no).finally(() => { active--; next(); }); };
   return (fn) => new Promise((ok, no) => { q.push([fn, ok, no]); next(); });
 })();
 const memo = (fn) => { const m = new Map(); return (k) => (m.has(k) ? m.get(k) : (m.set(k, fn(k)), m.get(k))); };
@@ -1068,21 +1073,26 @@ const statementImg = memo(async (sid) => {
 });
 
 function fillImgs(imgs, ids) {
-  imgs.forEach((img, i) => creditImg(ids[i]).then((src) => (img.src = src)).catch((e) => console.warn(`Credit #${ids[i]} art`, e)));
+  imgs.forEach((img, i) => creditImg(ids[i]).then((src) => {
+    img.onload = () => img.classList.remove("ld");
+    img.src = src;
+  }).catch((e) => console.warn(`Credit #${ids[i]} art`, e)));
 }
 
 // The 80-Credit mosaic grid, loaded lazily when it scrolls into view.
 function mosaicGrid(b, state) {
-  const grid = el("span", { class: "mosaic-grid" });
+  // 80 shimmering cells right away (never an empty grey box), then each Credit fades in as it
+  // arrives. Loading starts a screen ahead of the viewport so it's usually done by the time you look.
+  const grid = el("span", { class: "mosaic-grid" }, ...Array.from({ length: 80 }, () => el("i", { class: "slot ld" })));
   const io = new IntersectionObserver(async ([e]) => {
     if (!e.isIntersecting) return;
     io.disconnect();
     const ids = await batchIds(b, state);
-    const imgs = ids.map(() => el("img", { alt: "", loading: "lazy" }));
+    const imgs = ids.map(() => el("img", { alt: "", class: "ld" }));
     const empty = Array.from({ length: 80 - ids.length }, () => el("i", { class: "slot" }));
     grid.replaceChildren(...imgs, ...empty);
     fillImgs(imgs, ids);
-  });
+  }, { rootMargin: "250px 0px" });
   io.observe(grid);
   return grid;
 }
@@ -1178,7 +1188,10 @@ async function storeCard(sid, fee) {
   const inStore = owner && owner.toLowerCase() === S.store.toLowerCase();
   if (!endsAt && !inStore) return null; // sold and delivered: it shows in the gallery as owned
   const b = S.sidBatch.get(sid);
-  const art = b != null ? mosaicGrid(b, "Settled") : el("span", { class: "muted" }, `#${sid}`);
+  // The Statement's own image when its contract provides one (one call), else the 80-Credit mosaic.
+  const official = await statementImg(sid);
+  const art = official ? el("img", { class: "official-thumb", src: official, alt: `Statement #${sid}` })
+    : b != null ? mosaicGrid(b, "Settled") : el("span", { class: "muted" }, `#${sid}`);
   const noBids = highBidder === "0x0000000000000000000000000000000000000000";
   const live = endsAt && now() < endsAt;
   const card = el("div", { class: "stile store-card" },
@@ -1298,7 +1311,7 @@ function nextStep(x) {
       const started = x.tally * 2n > PER;
       if (!started) {
         const need = PER / 2n + 1n - x.tally;
-        return t(`Waiting for depositors to vote a minimum price: ${need} more slots needed.${mine && !x.pref ? " Enter yours below." : ""}`);
+        return t(`Waiting for depositors to vote a minimum price: ${need} more slots needed.${mine && !x.pref ? " Enter yours here." : ""}`);
       }
       return t(`Votes are in: minimum ${eth(x.reserve)}. Anyone can start the 24-hour auction.`);
     }
