@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>credit.pool · design preview</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="preview.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2300a3e0'/%3E%3Crect x='9' width='7' height='7' fill='%23e0007a'/%3E%3Crect y='9' width='7' height='7' fill='%23f5d000'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%23111'/%3E%3C/svg%3E">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="plates"><i class="c"></i><i class="m"></i><i class="y"></i><i class="k"></i></span>
+    credit.pool
+  </div>
+  <div class="wallet"><a class="muted small" href="index.html">← back to the live demo</a></div>
+</header>
+
+<main>
+  <div class="demo">Design preview: mock data, not connected to any contract. Nothing here is built yet. Designs:
+    docs/SELL-FIRST-DESIGN.md and docs/LAYERING-AND-CUSTOM-BATCHES.md.</div>
+
+  <section class="intro">
+    <h1>Statements print like a printer</h1>
+    <p>Jack: "the order and the color determine the appearance of the output", and you can keep layering.
+      These previews simulate that with 80 mock Credits. Try the buttons.</p>
+  </section>
+
+  <!-- ───────── 1. print order ───────── -->
+  <section>
+    <div class="section-head">
+      <h2>1 · Print order <span class="muted small">(arrangement vote)</span></h2>
+    </div>
+    <div class="pv-split">
+      <canvas id="order-canvas" class="pv-canvas" width="340" height="420" aria-label="Simulated Statement"></canvas>
+      <div class="pv-side">
+        <p class="muted small">Today every pooled Statement prints in deposit order, which is effectively random.
+          With the arrangement vote, anyone proposes an order and depositors adopt one with more than 40 of 80 slots.
+          It freezes before the sale, so buyers see exactly what prints.</p>
+        <div class="row" id="order-presets" role="group" aria-label="Print order">
+          <button class="ghost" data-order="deposit">Deposit order (today)</button>
+          <button class="ghost" data-order="colour">Grouped by colour</button>
+          <button class="ghost" data-order="number">By Credit number</button>
+          <button class="ghost" data-order="misreg">Misregistered</button>
+        </div>
+        <div class="pv-vote">
+          <div class="row"><b id="order-name">Deposit order</b><span class="tag Assembled">proposal</span></div>
+          <div class="pv-bar"><i id="order-bar" style="width: 0%"></i><span class="pv-q" style="left: 50%"></span></div>
+          <div class="muted small"><span id="order-slots">0</span> / 80 slots in favour · needs more than 40</div>
+          <button id="order-vote">Vote for this order (your 12 slots)</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── 2. custom batches ───────── -->
+  <section>
+    <div class="section-head">
+      <h2>2 · Custom batches</h2>
+    </div>
+    <p class="muted small">Anyone opens a batch with its own rules, alongside the open queue. Rules are fixed at the first deposit and
+      checked on-chain for every Credit. The creator gets no special powers.</p>
+    <div class="pv-split">
+      <form class="pv-card pv-form" id="create" aria-label="Create a batch (preview)">
+        <b>Open a batch</b>
+        <label class="muted small">Colours</label>
+        <div class="row" id="theme">
+          <button type="button" class="pv-chip on" data-ink="c">Cyan</button>
+          <button type="button" class="pv-chip on" data-ink="m">Magenta</button>
+          <button type="button" class="pv-chip on" data-ink="y">Yellow</button>
+          <button type="button" class="pv-chip on" data-ink="k">Black</button>
+        </div>
+        <label class="muted small" for="trait">Traits</label>
+        <select id="trait"><option>Any</option><option>Eights: 2+</option><option>Print: Heavy</option><option>Credit # 1–10,000</option></select>
+        <label class="muted small" for="who">Who can join</label>
+        <select id="who"><option>Anyone</option><option>Invite list</option></select>
+        <label class="muted small" for="preset">Print order</label>
+        <select id="preset"><option value="colour">Grouped by colour</option><option value="number">By Credit number</option><option value="misreg">Misregistered</option><option value="vote">Decide later (vote)</option></select>
+        <button type="button" id="create-go">Preview this batch</button>
+        <span class="muted small">Opening costs one of your own Credits as the first deposit. No extra fee.</span>
+      </form>
+      <div class="pv-side">
+        <canvas id="theme-canvas" class="pv-canvas" width="340" height="420" aria-label="Simulated themed Statement"></canvas>
+      </div>
+    </div>
+    <div class="pv-batches" id="example-batches"></div>
+  </section>
+
+  <!-- ───────── 3. sell first + backer offers ───────── -->
+  <section>
+    <div class="section-head">
+      <h2>3 · Sell first, burn second</h2>
+    </div>
+    <p class="muted small">Nothing burns until a buyer is locked in. With no buyer, your Credits stay yours, unburned. Backers can offer for a whole
+      batch; the majority accepts, then a 1-hour last call lets anyone beat it by 5%.</p>
+    <div class="pv-card pv-sale">
+      <div class="row"><b>Batch #46</b><span class="tag Full">full · not burned</span><span class="muted small">cyan only · grouped by colour</span></div>
+      <dl class="kv pv-kv">
+        <dt>Majority minimum</dt><dd>0.40 ETH (0.0050 / Credit)</dd>
+        <dt>Your slots</dt><dd>12 of 80</dd>
+        <dt>OpenSea floor (guide only)</dt><dd>0.0045 ETH / Credit</dd>
+      </dl>
+      <b class="small">Backer offers (ETH held by the contract)</b>
+      <table class="pv-offers">
+        <thead><tr><th>Backer</th><th>Whole batch</th><th>Per Credit</th><th>vs floor</th><th>Votes</th><th></th></tr></thead>
+        <tbody id="offers"></tbody>
+      </table>
+      <div class="pv-lastcall" id="lastcall" hidden>
+        <div class="row"><span class="tag Auction">last call</span><b id="lc-left">59:59</b><span class="muted small">left · accepted offer is the opening bid</span></div>
+        <div class="muted small">High bid <b id="lc-bid">0.44 ETH</b> by <span id="lc-who">0x7a3…c1</span> · anyone can outbid by 5% · bids in the last 15 min add 15 min</div>
+        <div class="row"><button id="lc-outbid" class="ghost">Outbid (+5%)</button><button id="lc-end" class="ghost">Skip to the end</button></div>
+        <div class="muted small" id="lc-result"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── 4. layering ───────── -->
+  <section>
+    <div class="section-head">
+      <h2>4 · Layering <span class="muted small">(back a Statement with Credits)</span></h2>
+    </div>
+    <div class="pv-split">
+      <canvas id="layer-canvas" class="pv-canvas" width="340" height="420" aria-label="Simulated layered Statement"></canvas>
+      <div class="pv-side">
+        <p class="muted small">A layer batch prints 80 more Credits onto an existing Statement (the canvas). The more layers,
+          the darker the print; every layer stays on-chain. Layers burn only when a buyer or backer is locked in.</p>
+        <label class="muted small" for="layers">Layers: <b id="layers-n">1</b></label>
+        <input id="layers" type="range" min="1" max="4" value="1">
+        <div class="row" id="layer-inks" aria-label="Ink of the next layer">
+          <span class="muted small">Next layer ink:</span>
+          <button class="pv-chip on" data-ink="c">C</button><button class="pv-chip" data-ink="m">M</button>
+          <button class="pv-chip" data-ink="y">Y</button><button class="pv-chip" data-ink="k">K</button>
+        </div>
+        <div class="pv-card">
+          <div class="row"><b>Statement #11</b><span class="tag Assembled">canvas · in the store</span></div>
+          <div class="muted small">Layer batch: <b>32 / 80</b> Credits · canvas counts 80 slots per existing layer</div>
+          <label class="muted small" for="mine">If you add</label>
+          <div class="row"><input id="mine" type="number" min="1" max="80" value="10"><span class="muted small">Credits to this layer</span></div>
+          <div class="muted small" id="split"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="muted small">Preview only. Every rule shown is enforced on-chain in the design; see the docs for invariants and the threat model.</footer>
+</main>
+<script type="module" src="preview.js"></script>
+</body>
+</html>
