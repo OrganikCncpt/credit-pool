@@ -255,17 +255,60 @@ contract BackedPoolTest is Test {
         p2.redeem(0);
     }
 
-    /// Votes were for the old Credits: reopening a full batch clears them (audit Info-1).
-    function test_ReopenClearsVotes() public {
-        (uint256[] memory a,,) = _fill();
+    /// A backing posted while filling is stale at Full; reconfirm refreshes it without new ETH.
+    function test_ReconfirmFillingBacking() public {
+        _deposit(alice, 40);
+        vm.prank(whale); pool.back{value: 1 ether}(0);
+        _deposit(bob, 30); _deposit(carol, 10);
+        (, uint256 best) = pool.bestBacking(0);
+        assertEq(best, 0);
+        vm.prank(whale); pool.reconfirm(0);
+        (, best) = pool.bestBacking(0);
+        assertEq(best, 1 ether);
+        assertEq(whale.balance, 99 ether); // no new ETH
+        _start(0);
+        vm.prank(whale2); vm.expectRevert(BackedPool.WrongBatchState.selector); pool.reconfirm(0); // not during an auction
+    }
+
+    function test_ReconfirmNeedsABacking() public {
+        _fill();
+        vm.prank(whale); vm.expectRevert(BackedPool.NotBacked.selector); pool.reconfirm(0);
+    }
+
+    /// Reopening keeps the other depositors' votes; a depositor who leaves entirely loses theirs.
+    function test_ReopenKeepsOtherVotes() public {
+        (uint256[] memory a,, uint256[] memory c) = _fill();
         vm.prank(alice); pool.setReserve(0, 1 ether);
         vm.prank(bob); pool.setReserve(0, 1 ether);
-        assertEq(pool.majorityMinimum(0), 1 ether);
+        vm.prank(carol); pool.setReserve(0, 2 ether);
         uint256[] memory one = new uint256[](1); one[0] = a[0];
-        vm.prank(alice); pool.withdraw(one);
-        assertEq(pool.reservePref(0, alice), 0);
-        assertEq(pool.reservePref(0, bob), 0);
-        assertEq(pool.majorityMinimum(0), 0);
+        vm.prank(alice); pool.withdraw(one);         // alice still has 39: keeps her vote
+        assertEq(pool.reservePref(0, alice), 1 ether);
+        assertEq(pool.reservePref(0, bob), 1 ether);
+        vm.prank(carol); pool.withdraw(c);           // carol leaves entirely: her vote goes
+        assertEq(pool.reservePref(0, carol), 0);
+    }
+
+    /// Option-1 audit M: a 1-slot depositor can't erase the majority's price by withdraw + refill.
+    function test_OneSlotCantWipeQuorum() public {
+        uint256[] memory a = _deposit(alice, 40);
+        _deposit(bob, 39);
+        uint256[] memory g = _deposit(carol, 1);     // the griefer's single slot
+        a; // silence
+        _vote(0, 1 ether);
+        vm.prank(whale); pool.back{value: 1 ether}(0);
+        uint256 fee = pool.depositFeeFor(1);
+        for (uint256 k; k < 5; ++k) {
+            vm.startPrank(carol);
+            pool.withdraw(g);
+            pool.depositInto{value: fee}(0, g, 79);
+            vm.stopPrank();
+        }
+        assertEq(pool.majorityMinimum(0), 1 ether);  // the price survives
+        vm.prank(whale); pool.back{value: 1}(0);     // backing re-confirmed for the new nonce
+        vm.warp(opensAt);
+        pool.startAuction(0, 1 ether);
+        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Auction));
     }
 
     function test_BackerCapEvictsLowest() public {

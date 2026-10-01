@@ -19,6 +19,7 @@ interface IBackedPool {
     function backings(uint256 b, address who) external view returns (uint256 amount, uint64 nonce);
     function back(uint256 b) external payable;
     function withdrawBacking(uint256 b) external;
+    function reconfirm(uint256 b) external;
     function withdrawRefund() external;
     function pendingReturns(address who) external view returns (uint256);
 }
@@ -86,6 +87,7 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
     error PoolAlreadySet();
     error NotFull();
     error AboveMinimum();
+    error NoMinimum();
     error PriceMoved();
     error NotDepositor();
     error LengthMismatch();
@@ -171,8 +173,8 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
 
     /// @notice Back a full batch from the treasury. `expectedTotal` is the treasury's total backing
     ///         on this batch after the call, as the owner reviewed it: anything else reverts. The
-    ///         total stays within maxTreasuryBid and, once depositors have a majority minimum, within
-    ///         that minimum: the treasury never offers more than the depositors themselves ask.
+    ///         depositors must have a majority price first, and the total stays within maxTreasuryBid
+    ///         and that price: the treasury never offers more than the depositors themselves ask.
     ///         Topping up (any amount) also re-confirms a backing after the batch's Credits changed.
     function backBatch(uint256 b, uint256 amount, uint256 expectedTotal) external onlyOwner nonReentrant {
         (uint8 state,, uint256 depositors,,,,) = pool.batchInfo(b);
@@ -182,10 +184,28 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
         uint256 total = current + amount;
         if (total != expectedTotal) revert PriceMoved();
         uint256 minimum = pool.majorityMinimum(b);
-        if (minimum != 0 && total > minimum) revert AboveMinimum();
+        // No price yet: no auction can open, so a treasury backing would only sit there, and it
+        // could later open above whatever price the depositors then set (option-1 audit L).
+        if (minimum == 0) revert NoMinimum();
+        if (total > minimum) revert AboveMinimum();
         if (total > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
         pool.back{value: amount}(b);
         emit TreasuryBacked(b, amount, total);
+    }
+
+    /// @notice Re-confirm the treasury's backing after the batch's Credits changed, without adding ETH.
+    ///         Same rules as backBatch: a Full batch, not a sole holder's, with a depositors' price the
+    ///         backing doesn't exceed.
+    function reconfirmBatch(uint256 b) external onlyOwner nonReentrant {
+        (uint8 state,, uint256 depositors,,,,) = pool.batchInfo(b);
+        if (state != 1) revert NotFull();
+        if (depositors < 2) revert NotDepositor();
+        (uint256 current,) = pool.backings(b, address(this));
+        uint256 minimum = pool.majorityMinimum(b);
+        if (minimum == 0) revert NoMinimum();
+        if (current > minimum) revert AboveMinimum();
+        pool.reconfirm(b);
+        emit TreasuryBacked(b, 0, current);
     }
 
     /// @notice Take the treasury's backing on a batch back into the treasury (only while it isn't a

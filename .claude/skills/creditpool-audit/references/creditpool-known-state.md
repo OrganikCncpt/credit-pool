@@ -158,6 +158,27 @@ External audit #2 (on `audit-prep-3`; `docs/EXTERNAL-AUDIT-2-TRIAGE.md`):
 | CP-57 | `_liveFee` reverted on malformed feed return data (ext. L7) | Low-level staticcall; short or failed data → fallback |
 | CP-58 | Info set (ext. I-2, I-6, I-9, I-12): award lengths, silent bid-fee hold, fee recipient = pool/vault, deploy feed-check underflow | `LengthMismatch`; `BidFeesHeld` + `FEE_CALL_GAS`; rejected; `updatedAt <= now`, 70-minute freshness |
 
+## BackedPool / BackedStore (sell first, burn second): fixed (regression = finding)
+
+`src/BackedPool.sol` + `src/BackedStore.sol` are the backed-auction successors (CreditPool/CreditStore stay as
+audited). Full triage: `docs/BACKED-AUDIT-1.md`. Design: `docs/SELL-FIRST-DESIGN.md`.
+
+| # | Finding | Fix |
+|---|---|---|
+| BP-1 | Store treasury locked: CreditStore's only outflow called CreditPool-only functions (M) | `BackedStore.backBatch`/`unbackBatch`/`collectRefund` |
+| BP-2 | Stale backings could squat the 10-backer list (M) | `_evictable`: stale evicted first |
+| BP-3 | Exact-match start params let a 1-wei top-up or vote flip block starts (L) | `startAuction(b, minOpening)`: opening ≥ seen |
+| BP-4 | Pool built with an unlinked store unwinds every sale (L) | `_requireLinked()` in `startAuction`/`redeem` |
+| BP-5 | Lowball backer could start auctions and lock depositors' Credits ~48h, repeatedly (design) | Option 1: start needs `majorityMinimum != 0` and best backing ≥ it; Decide/accept/expire removed |
+| BP-6 | Reopening a Full batch cleared every vote: a 1-slot depositor erased a 41+ slot price for one fee, repeatedly, blocking every start (M, option-1 audit) | Only a depositor who leaves entirely loses their vote; others persist (supersedes the earlier "clear all votes on reopen" Info-1 fix) |
+| BP-7 | Treasury could back with no price, skipping the "≤ depositors' price" cap, then open above a later price (L) | `backBatch` requires `majorityMinimum != 0` (`NoMinimum`) |
+| BP-8 | Treasury couldn't re-confirm a stale backing sitting exactly at the price (L) | `BackedPool.reconfirm(b)` (no ETH) + owner `BackedStore.reconfirmBatch(b)` with the same price rule |
+
+Accepted (BackedPool): claim rounding dust < 80 wei per batch; treasury price rule checked at backing time
+(owner warned in UI if the price drops); a backing posted while Filling is stale at Full until `reconfirm`;
+a pivotal small voter can tip the majority price (same as the minimum-price vote everywhere); finalize gas vs
+the real Statements mint (re-measure, OK-1).
+
 ## Accepted residuals (known, deliberate or out of our control)
 
 | ID | Residual | Why accepted |

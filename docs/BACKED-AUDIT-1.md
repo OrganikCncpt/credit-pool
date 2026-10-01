@@ -49,3 +49,31 @@ The PoCs were re-run against the fixed contract: each fixed finding's PoC now fa
 - The cap and its 3-day delay also apply to top-ups.
 - Every pool state ends with the treasury's ETH recoverable or its Statement in the store.
 - The owner can't pull treasury ETH out except by backing a batch.
+
+---
+
+# Option-1 change audit (auctions open only at or above the depositors' price)
+
+**Scope:** commit `d2813e4` versus `dcbe3ba`: the `startAuction` price gate, and the removal of Decide, `acceptBid` and `expire`. Also how it interacts with BackedStore.
+
+**Method:** the `creditpool-audit` skill's diff review. Three blind specialists (state machine, auction game theory, access control) each read their public checklists and wrote Foundry PoCs in isolated copies. Every finding was then reproduced against the repo; the new tests fail on the old code and pass on the fix.
+
+**Result:** no Critical or High.
+
+| # | Finding | Severity | Status |
+|---|---|---|---|
+| 1 | Reopening a full batch cleared every depositor's vote. A 1-slot depositor could `withdraw` + `depositInto` for one deposit fee and erase a 41+ slot price, again and again, blocking every start, since option 1 needs a price. Found independently by two specialists. | Medium | **Fixed.** Other depositors' votes persist; only a depositor who leaves entirely loses theirs. This supersedes the earlier Info-1 "clear all votes" fix: a start still needs a backing ≥ the live majority price. Tests: `test_OneSlotCantWipeQuorum`, `test_ReopenKeepsOtherVotes` (both fail on `d2813e4`). |
+| 2 | The treasury could back while no price existed, skipping the "≤ depositors' price" cap. Its backing could then open above a lower price voted later. | Low | **Fixed.** `backBatch` reverts `NoMinimum`, and the owner panel waits for a price. Test: `test_NoTreasuryBackingWithoutPrice`. |
+| 3 | A treasury backing sitting exactly at the price couldn't be re-confirmed after the Credits changed: any top-up exceeds the price. | Low | **Fixed.** `BackedPool.reconfirm(b)` refreshes a backing without ETH, for any backer. `BackedStore.reconfirmBatch(b)` (owner) applies the same price rule. Tests: `test_TreasuryReconfirmsAtExactPrice`, `test_TreasuryReconfirmRespectsPrice`, `test_ReconfirmFillingBacking`. |
+| 4 | A backing posted while the batch fills is always stale once it's Full: the filling deposit bumps the nonce. | Info | Accepted. It's now one free `reconfirm` click, and the site shows the button. |
+| 5 | A stale comment said acceptances bind to `round`. | Info | Fixed. |
+| 6 | `app/flow.js` and `app/preview.js` (mock-data prototypes, no contract calls) still show the old decide step. | Info | Doc drift; prototypes only. |
+
+**Checked and sound:**
+- No state can get stuck. Every Auction has a price, and its high bid meets it.
+- The unwind is the only non-sale exit from an Auction, and the majority can escape a failing-finalize loop by clearing its votes.
+- No path forces a sale below the majority's price. A vote raised in the same block as a start makes the start revert.
+- Enum ordinals are consistent: BackedStore `state == 1`, and the site's `BACKED_STATES`.
+- Access guards are consistent after the removal.
+- Owner powers are unchanged.
+- ETH accounting holds without `expire`.

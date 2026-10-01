@@ -35,7 +35,7 @@ buy-unsold role and a long tail of edge cases (CP-29..58).
 Filling ─fill─▶ Full ── vote a price (41/80) ── backing ≥ price ──start──▶ AUCTION (24h, backing = opening bid)
    ▲             │ backers can post, raise, withdraw at any amount             │
    │             │ (below the price they just wait; they can't start anything)  └─ ends ─▶ FINALIZE (sells)
-   └─ withdraw ──┘ (no auction live; clears votes)                                         │ burn fails
+   └─ withdraw ──┘ (no auction live; votes stay)                                           │ burn fails
                                                                                 ◀── unwind: refund, back to Full
 FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to depositors (pull) → points
 ```
@@ -81,7 +81,8 @@ after it.
 
    If any step fails, **everything unwinds** (§5).
 8. **Exit.** While no auction is live, a depositor of a Full batch can withdraw. The batch goes back to
-   Filling, and all votes for it are cleared (the composition changed).
+   Filling. Other depositors' votes stay (a depositor who leaves entirely loses theirs): clearing every vote
+   let a 1-slot depositor erase the majority's price by withdrawing and refilling (option-1 audit M).
    Backings remain but must be re-matched to the new composition before a start.
 
 ## 3. Safety invariants (must hold always; each gets a handler invariant, and I1–I3 a formal proof)
@@ -95,7 +96,7 @@ after it.
 | I5 | A sale pays exactly the auction's high bid, and nobody can swap, lower or cancel a committed bid. |
 | I6 | A failed burn never loses a Credit or a wei: a full unwind to the pre-FINALIZE state, and the buyer is refunded. |
 | I7 | No auction starts without a majority price and a funded backing at or above it; the opening bid is the highest current backing at that moment. |
-| I8 | Backings bind to a composition nonce, and reopening a full batch clears its votes. Any change to a batch's Credit set invalidates them. |
+| I8 | Backings bind to a composition nonce: any change to a batch's Credit set makes them stale until their backer re-confirms (`reconfirm`, no ETH). Votes are prices for the whole batch and persist; only a depositor who leaves entirely loses theirs. |
 | I9 | Each batch finalizes at most once. Each Statement is delivered to exactly one buyer and backs exactly one batch. |
 | I10 | Neither owner can move Credits, backings, bids or proceeds, or pause any of it. |
 

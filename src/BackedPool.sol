@@ -61,7 +61,7 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     struct Batch {
         BatchState state;
         uint64 nonce;          // bumps on every change to the Credit set: stale backings can't open an auction
-        uint64 round;          // bumps on every auction start: acceptances bind to a round
+        uint64 round;          // bumps on every auction start (events and the site count rounds)
         uint256 statementId;
         uint256 proceeds;
         uint256[] creditIds;
@@ -271,9 +271,11 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
             Batch storage batch = _batches[b];
             if (batch.state == BatchState.Full) {
                 batch.state = BatchState.Filling;
-                // Votes were cast for the old set of Credits: clear them all (design §2.8, audit Info-1).
-                address[] storage ds = batch.depositors;
-                for (uint256 j; j < ds.length; ++j) delete reservePref[b][ds[j]];
+                // Other depositors' votes stay: a vote is a price for the whole batch, and a start
+                // still needs a backing at or above the live majority price. Clearing every vote here
+                // let a 1-slot depositor erase a 41+ slot quorum (withdraw + depositInto) for one
+                // deposit fee, again and again (option-1 audit M). A depositor who leaves entirely
+                // loses their vote in _removeDepositor; anyone can change theirs at any time.
                 emit BatchReopened(b);
             } else if (batch.state != BatchState.Filling) {
                 revert WrongBatchState();
@@ -357,6 +359,18 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         mine.amount = total;
         mine.nonce = batch.nonce;
         emit Backed(b, msg.sender, total);
+    }
+
+    /// @notice Re-confirm your backing for the batch's current Credits, without adding ETH. A backing
+    ///         made before the Credits changed (including one posted while the batch filled) can't open
+    ///         an auction until its backer confirms it for the new set.
+    function reconfirm(uint256 b) external nonReentrant {
+        Batch storage batch = _batches[b];
+        if (batch.state != BatchState.Filling && batch.state != BatchState.Full) revert WrongBatchState();
+        Backing storage mine = backings[b][msg.sender];
+        if (mine.amount == 0) revert NotBacked();
+        mine.nonce = batch.nonce;
+        emit Backed(b, msg.sender, mine.amount);
     }
 
     /// @notice Take your backing back (to your refunds). Always possible for a backing that isn't

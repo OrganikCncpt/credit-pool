@@ -37,6 +37,7 @@ export const BACKED_ABI = parseAbi([
   "function setReserve(uint256 batchId, uint256 reserveWei)",
   "function back(uint256 batchId) payable",
   "function withdrawBacking(uint256 batchId)",
+  "function reconfirm(uint256 batchId)",
   "function startAuction(uint256 batchId, uint256 minOpening)",
   "function bid(uint256 batchId) payable",
   "function settle(uint256 batchId)",
@@ -63,8 +64,9 @@ export const TREASURY_ABI = parseAbi([
   "function maxTreasuryBid() view returns (uint256)",
   "function backBatch(uint256 batchId, uint256 amount, uint256 expectedTotal)",
   "function unbackBatch(uint256 batchId)",
+  "function reconfirmBatch(uint256 batchId)",
   "function collectRefund()",
-  "error NotFull()", "error NotDepositor()", "error AboveMinimum()", "error OverCap()", "error PriceMoved()",
+  "error NotFull()", "error NotDepositor()", "error AboveMinimum()", "error NoMinimum()", "error OverCap()", "error PriceMoved()",
 ]);
 
 export const BACKED_STATES = ["Filling", "Full", "Auction", "Settled"];
@@ -88,6 +90,7 @@ export const FINALIZE_TX_GAS = 14_000_000n;
 export const BACKED_TIPS = {
   back: "Offer ETH for this whole batch. Only a backing at or above the depositors' price can open the auction, as its opening bid. " +
     "If nobody outbids it, you get the Statement. Until the auction starts you can top up or take it back any time.",
+  reconfirm: "Confirms your backing for the batch's current Credits, without adding ETH. Needed after the Credits change (including a backing posted while it filled).",
   unback: "Takes your backing back to Ready to collect. Only possible while it isn't the opening bid of a running auction.",
   vote: "The lowest price you'd accept for the whole batch. The depositors' price is the lowest price that more than 40 of the 80 slots accept. " +
     "No auction can start without it, and it only opens with a backing at or above it, so every auction sells at that price or more. Enter 0 to clear your vote.",
@@ -137,7 +140,7 @@ export function applyBackedCopy(el) {
     q("When do my Credits burn?", "Only when a sale is locked in, at the end of an auction that opened at or above the depositors' price. " +
       "The burn, delivery and payout happen in one transaction; if any part fails, everything is undone and the bidder is refunded."),
     q("Can I get my Credits back?", "Yes: any time while the batch fills, and while it's full as long as no auction is running. Taking Credits out of a full batch reopens it, " +
-      "clears the votes, and backings made for the old set of Credits no longer count until their backer confirms them again. The deposit fee isn't refunded."),
+      "and backings made for the old set of Credits no longer count until their backer re-confirms them (one free click). Votes stay; a depositor who leaves entirely loses theirs. The deposit fee isn't refunded."),
   );
 }
 
@@ -233,10 +236,12 @@ export async function backedCard(ctx, b, mineOnly) {
       const target = minimum ? (bestAmt >= minimum ? bestAmt + bestAmt / 20n : minimum) : 0n;
       const fill = target > myBack ? target - myBack : 0n;
       const i = input(myBack ? "Add (ETH)" : "Backing (ETH)", fill ? formatEther(fill) : "");
-      backing.append(el("div", { class: "row" }, i, btn(myBack ? (stale ? "Re-confirm / add" : "Add to backing") : "Back this batch", async () => {
+      // The batch's Credits changed since you backed: one free click makes your backing count again.
+      if (stale) backing.append(el("div", { class: "row" }, el("span", { class: "muted small" }, "The Credits changed since you backed."),
+        btn(`Re-confirm my ${eth(myBack)}`, () => send(`Re-confirm #${b}`, "reconfirm", [b]), "", "reconfirm")));
+      backing.append(el("div", { class: "row" }, i, btn(myBack ? "Add to backing" : "Back this batch", async () => {
         let v = toWei(i.value || "0");
         if (v == null) return toast("Enter an amount in ETH", true);
-        if (v === 0n && stale) v = 1n; // re-confirming for the current Credits needs a non-zero top-up
         if (v === 0n) return toast("Enter an amount in ETH", true);
         if (myBack + v < 80n) return toast("A backing must be at least 80 wei (1 wei per slot)", true);
         const total = myBack + v;
@@ -319,7 +324,7 @@ export async function backedCard(ctx, b, mineOnly) {
       const owners = await Promise.all(all.map((id) => readFresh("depositorOf", [id])));
       const mine = all.filter((_, i) => owners[i].toLowerCase() === me.toLowerCase());
       if (state === "Full" && !(await confirmStep(`Withdraw from full batch #${b}?`, [
-        "The batch reopens and needs refilling before it can be auctioned. Every depositor's vote is cleared.",
+        "The batch reopens and needs refilling before it can be auctioned. Other depositors' votes stay; if you take all your Credits, your vote goes.",
         bestAmt ? "Its backers' offers were for these exact Credits: they'll need to re-confirm before an auction can start." : "Nobody has backed it yet.",
         "The deposit fee isn't refunded.",
       ], "Withdraw"))) return;
@@ -346,16 +351,19 @@ export async function backedCard(ctx, b, mineOnly) {
 // Owner-only: back this batch from the store treasury. The contract re-checks every limit.
 async function treasuryControl(ctx, b, minimum) {
   const { S, el, read, send, eth, toWei, confirmStep, toast } = ctx;
-  const [[current], cap, bal] = await Promise.all([
-    read("backings", [b, S.store]), read("maxTreasuryBid", [], S.store, TREASURY_ABI), read("treasuryBalance", [], S.store, TREASURY_ABI),
+  const [[current, curNonce], cap, bal, info] = await Promise.all([
+    read("backings", [b, S.store]), read("maxTreasuryBid", [], S.store, TREASURY_ABI), read("treasuryBalance", [], S.store, TREASURY_ABI), read("batchInfo", [b]),
   ]);
-  const limit = minimum && minimum < cap ? minimum : cap;
+  const head = el("span", { class: "backing-label" }, "Store treasury · owner");
+  // No price yet: the treasury can't back (it would have nothing to stay under).
+  if (!minimum) return el("div", { class: "treasury-ctl" }, head,
+    el("span", { class: "muted small" }, `The treasury can back once the depositors set a price · treasury holds ${eth(bal)}`));
+  const limit = minimum < cap ? minimum : cap;
   const room = limit > current ? limit - current : 0n;
   const i = el("input", { type: "number", step: "any", min: "0", placeholder: "Treasury (ETH)", value: room ? formatEther(room < bal ? room : bal) : "" });
-  const box = el("div", { class: "treasury-ctl" },
-    el("span", { class: "backing-label" }, "Store treasury · owner"),
-    el("span", { class: "muted small" }, `Backing ${eth(current)} · limit ${eth(limit)}${minimum && minimum < cap ? " (the depositors' price)" : " (per-batch cap)"} · treasury holds ${eth(bal)}`),
-    el("div", { class: "row" }, i,
+  const box = el("div", { class: "treasury-ctl" }, head,
+    el("span", { class: "muted small" }, `Backing ${eth(current)} · limit ${eth(limit)}${minimum < cap ? " (the depositors' price)" : " (per-batch cap)"} · treasury holds ${eth(bal)}`),
+    room ? el("div", { class: "row" }, i,
       el("button", { "data-tip": "treasuryBack", onclick: async () => {
         const v = toWei(i.value);
         if (!v) return toast("Enter an amount in ETH", true);
@@ -363,16 +371,20 @@ async function treasuryControl(ctx, b, minimum) {
         if (total > limit) return toast(`The treasury can back at most ${eth(limit, 6)} here`, true);
         const ok = await confirmStep(`Back batch #${b} from the treasury?`, [
           `Moves ${eth(v, 6)} of treasury ETH into the pool, for a total treasury backing of ${eth(total, 6)}.`,
+          total === minimum ? "That's exactly the depositors' price, so it can open the auction." : `Below the depositors' price of ${eth(minimum, 6)}, it can't open the auction yet.`,
           "If it opens the auction and nobody outbids it, the Statement comes to the store, ready to list for SCREDIT.",
-          "Outbid or unwound: the ETH comes back to the treasury (Collect). An auction opens only at or above the depositors' minimum.",
+          "Outbid or unwound: the ETH comes back to the treasury (Collect).",
           "If the backing changed before this lands, it's refused.",
         ], "Back from treasury");
         if (ok) send(`Treasury backs #${b}`, "backBatch", [b, v, total], undefined, S.store, TREASURY_ABI);
-      } }, "Back from treasury")),
+      } }, "Back from treasury")) : null,
   );
-  // The minimum rule is checked when the treasury backs (store audit Info-1): if depositors lower
-  // their minimum afterwards, say so, so the owner can return the difference before a start.
-  if (current && minimum && current > minimum) box.append(el("p", { class: "next warn" },
+  if (current && curNonce !== info[6] && current <= minimum) box.append(el("button", {
+    onclick: () => send(`Treasury re-confirms #${b}`, "reconfirmBatch", [b], undefined, S.store, TREASURY_ABI),
+  }, `Re-confirm treasury's ${eth(current)} (Credits changed)`));
+  // The price rule is checked when the treasury backs (store audit Info-1): if depositors lower
+  // their price afterwards, say so, so the owner can return the difference before a start.
+  if (current && current > minimum) box.append(el("p", { class: "next warn" },
     `The depositors' price dropped to ${eth(minimum)}, below the treasury's ${eth(current)} backing. Return it and back again at the new price if you don't want to pay more than they ask.`));
   if (current) box.append(el("button", { class: "ghost", onclick: () => send(`Treasury unbacks #${b}`, "unbackBatch", [b], undefined, S.store, TREASURY_ABI) }, `Return ${eth(current)} to treasury`));
   return box;

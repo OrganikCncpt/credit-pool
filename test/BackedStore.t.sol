@@ -110,7 +110,7 @@ contract BackedStoreTest is Test {
     }
 
     function test_UnbackReturnsToTreasury() public {
-        _fill();
+        _fill(); _votes(3 ether);
         store.backBatch(0, 2 ether, 2 ether);
         store.backBatch(0, 1 ether, 3 ether); // top up
         store.unbackBatch(0);
@@ -120,7 +120,7 @@ contract BackedStoreTest is Test {
     }
 
     function test_EvictedTreasuryBackingComesBack() public {
-        _fill();
+        _fill(); _votes(1 ether);
         store.backBatch(0, 0.1 ether, 0.1 ether);
         for (uint256 i; i < 10; ++i) {
             address x = makeAddr(string.concat("bs-backer", vm.toString(i)));
@@ -143,7 +143,7 @@ contract BackedStoreTest is Test {
     }
 
     function test_CapAndBalance() public {
-        _fill();
+        _fill(); _votes(100 ether);
         vm.expectRevert(BackedStore.OverCap.selector);
         store.backBatch(0, 6 ether, 6 ether); // cap 5 ether per batch
         store.setMaxTreasuryBid(50 ether);    // raise: only after 3 days
@@ -156,7 +156,7 @@ contract BackedStoreTest is Test {
     }
 
     function test_PinnedTotal() public {
-        _fill();
+        _fill(); _votes(2 ether);
         store.backBatch(0, 1 ether, 1 ether);
         vm.expectRevert(BackedStore.PriceMoved.selector);
         store.backBatch(0, 1 ether, 1 ether); // owner thought it was the first backing
@@ -171,6 +171,50 @@ contract BackedStoreTest is Test {
         store.backBatch(1, 1 ether, 1 ether);
     }
 
+    /// The treasury can re-confirm a backing that sits exactly at the price after the Credits changed.
+    function test_TreasuryReconfirmsAtExactPrice() public {
+        uint256[] memory a = _fill(); _votes(1 ether);
+        store.backBatch(0, 1 ether, 1 ether);
+        uint256[] memory one = new uint256[](1); one[0] = a[0];
+        vm.prank(alice); pool.withdraw(one);
+        uint256[] memory fresh = _give(bob, 1);
+        uint256 fee = pool.depositFeeFor(1);
+        vm.prank(bob); pool.depositInto{value: fee}(0, fresh, 79);
+        (, uint256 best) = pool.bestBacking(0);
+        assertEq(best, 0);
+        vm.expectRevert(BackedStore.AboveMinimum.selector);
+        store.backBatch(0, 1, 1 ether + 1);  // a top-up would exceed the price…
+        store.reconfirmBatch(0);              // …a re-confirm doesn't
+        pool.startAuction(0, 1 ether);
+        // and it refuses when the price has dropped below the backing
+    }
+
+    function test_TreasuryReconfirmRespectsPrice() public {
+        uint256[] memory a = _fill(); _votes(1 ether);
+        store.backBatch(0, 1 ether, 1 ether);
+        uint256[] memory one = new uint256[](1); one[0] = a[0];
+        vm.prank(alice); pool.withdraw(one);
+        uint256[] memory fresh = _give(bob, 1);
+        uint256 fee = pool.depositFeeFor(1);
+        vm.prank(bob); pool.depositInto{value: fee}(0, fresh, 79);
+        _votes(0.5 ether);
+        vm.expectRevert(BackedStore.AboveMinimum.selector);
+        store.reconfirmBatch(0);
+        vm.prank(whale); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, whale));
+        store.reconfirmBatch(0);
+    }
+
+    /// Option-1 audit L: no treasury backing before the depositors have a price.
+    function test_NoTreasuryBackingWithoutPrice() public {
+        _fill();
+        vm.expectRevert(BackedStore.NoMinimum.selector);
+        store.backBatch(0, 1 ether, 1 ether);
+        _votes(0.1 ether);
+        vm.expectRevert(BackedStore.AboveMinimum.selector);
+        store.backBatch(0, 1 ether, 1 ether);
+        store.backBatch(0, 0.1 ether, 0.1 ether);
+    }
+
     function test_OnlyOwner() public {
         _fill();
         vm.prank(whale); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, whale));
@@ -180,7 +224,7 @@ contract BackedStoreTest is Test {
     }
 
     function test_StaleTreasuryBackingReconfirmedByTopUp() public {
-        uint256[] memory a = _fill();
+        uint256[] memory a = _fill(); _votes(2 ether);
         store.backBatch(0, 1 ether, 1 ether);
         uint256[] memory one = new uint256[](1); one[0] = a[0];
         vm.prank(alice); pool.withdraw(one);
