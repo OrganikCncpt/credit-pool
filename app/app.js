@@ -352,7 +352,7 @@ async function init() {
   if (S.account && !S.viewOnly) $("revoke-link").href = `https://revoke.cash/address/${S.account}`;
   if (S.chainId === 31337) {
     const who = S.demoAs ? `You're acting as ${short(S.account)}.` : S.viewOnly ? `Viewing ${short(S.account)} read-only.` : "";
-    $("demo").textContent = `Local demo on a copy of ${S.dep.forkOf ?? "Ethereum mainnet"}: test ETH only, nothing here touches real Credits or real money. ${who}`;
+    $("demo").textContent = `Local demo ${S.dep.forkOf ? `on a copy of ${S.dep.forkOf}` : "on a local test chain"}: test ETH only, nothing here touches real Credits or real money. ${who}`;
     $("demo").hidden = false;
   } else if (S.dep.testnet) {
     $("demo").textContent = `Testnet (${S.dep.name}): test ETH and test copies of Credits only. Nothing here is real money or real Credits.`;
@@ -548,7 +548,7 @@ async function renderStats() {
     stat(String(open), "batches filled so far"),
     el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
     stat(fee == null ? "unavailable" : ethFee(fee * 2n), fallback ? "fee per Credit (fixed fallback: price feed offline)" : `fee per Credit (${feeUsd(2)}; ${feeUsd(1)} each for ${BULK_MIN}+)`),
-    ...(treasury == null ? [] : [stat(eth(treasury, 4), S.backed ? "store treasury (75% of fees; backs batches)" : "store treasury (buys unsold Statements)")]),
+    ...(treasury == null ? [] : [stat(eth(treasury, 4), S.backed ? "store treasury (75% of fees; buys unsold batches)" : "store treasury (buys unsold Statements)")]),
     stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, S.backed ? "auctions" : "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
