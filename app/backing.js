@@ -69,6 +69,10 @@ export const TREASURY_ABI = parseAbi([
   "error NotFull()", "error NotDepositor()", "error AboveMinimum()", "error NoMinimum()", "error OverCap()", "error PriceMoved()",
 ]);
 
+const STATEMENT_OWNER_ABI = parseAbi(["function ownerOf(uint256) view returns (address)"]);
+// A bid prefill people can read: the minimum rounded UP to 4 significant digits (never below it).
+const roundUp = (wei) => { const len = wei.toString().length; if (len <= 4) return wei; const u = 10n ** BigInt(len - 4); return ((wei + u - 1n) / u) * u; };
+
 export const BACKED_STATES = ["Filling", "Full", "Auction", "Settled"];
 const LABEL = { Filling: "Filling", Auction: "Auction", Settled: "Sold" };
 // A full batch's tag says what it's waiting for: a price, a backer at that price, or someone to press Start.
@@ -170,7 +174,10 @@ async function load(ctx, b) {
     ]);
     voted = counts.reduce((t, n, i) => (prefs[i] ? t + n : t), 0n);
   }
+  // Whoever ends up holding the Statement (winning bidder or backer) keeps seeing the batch.
+  const owner = state === "Settled" && me ? await read("ownerOf", [statementId], S.statements, STATEMENT_OWNER_ABI).catch(() => null) : null;
   const m = {
+    iWon: !!owner && owner.toLowerCase() === me.toLowerCase(),
     b, info, state, filled, depositors, statementId, proceeds, nonce, highBidder, highBid, auctionMin, endsAt,
     bestWho, bestAmt, minimum, backers, slots, pref, claimed, myBack, opensAt, voted,
     myStale: myBack > 0n && myBackNonce !== nonce,
@@ -184,7 +191,7 @@ async function load(ctx, b) {
   m.share = proceeds && slots ? (proceeds * slots) / 80n : 0n;
   // Where it is on the five-step rail: Fill → Price → Backer → Auction → Sold.
   m.step = state === "Filling" ? 0 : state === "Full" ? (!minimum ? 1 : !m.ready ? 2 : 3) : state === "Auction" ? 3 : 5;
-  m.sig = JSON.stringify([info, auction, best, minimum, backers, slots, pref, claimed, myBacking, voted, m.live, now() >= opensAt, me, S.viewOnly],
+  m.sig = JSON.stringify([info, auction, best, minimum, backers, slots, pref, claimed, myBacking, voted, m.live, now() >= opensAt, me, S.viewOnly, m.iWon],
     (_, v) => (typeof v === "bigint" ? v.toString() : v));
   return m;
 }
@@ -212,6 +219,7 @@ function status(ctx, m) {
         : `Ended at ${eth(m.highBid)} · ready to settle`;
     case "Settled":
       if (!m.proceeds) return "Burned into a Statement for its sole holder";
+      if (m.iWon && !m.slots) return `You won it for ${eth(m.proceeds)} · Statement #${m.statementId} is in your wallet`;
       return `Sold for ${eth(m.proceeds)}${m.slots ? ` · your share ${eth(m.share)}${m.claimed ? ", collected" : ""}` : ""}`;
     default: return "";
   }
@@ -311,7 +319,7 @@ async function primary(ctx, m) {
       if (m.ended) return button(`Settle · sell for ${eth(m.highBid)}`, a.settle, "settleBacked");
       if (m.iLead) return null;
       { const min = await ctx.readFresh("minNextBid", [m.b]);
-        return inline("Bid (ETH)", formatEther(min), "Bid", (v) => a.bid(v, min), "bid"); }
+        return inline("Bid (ETH)", formatEther(roundUp(min)), "Bid", (v) => a.bid(v, min), "bid"); }
     case "Settled":
       return m.slots && m.proceeds && !m.claimed ? button(`Claim ${eth(m.share)}`, a.claim, "claim") : null;
     default: return null;
@@ -322,7 +330,7 @@ async function primary(ctx, m) {
 export async function backedCard(ctx, b, mineOnly) {
   const { S, el } = ctx;
   const m = await load(ctx, b);
-  if (mineOnly && !m.slots && !m.myBack && !m.iLead) return null;
+  if (mineOnly && !m.slots && !m.myBack && !m.iLead && !m.iWon) return null;
   const key = `${mineOnly ? "mine" : "all"}:${b}`;
   const cached = S.cards.get(key);
   if (cached && cached.sig === m.sig) return cached.el;
@@ -368,7 +376,7 @@ async function renderDrawer(ctx) {
 
   // Price
   if (m.state === "Filling" || m.state === "Full") {
-    const p = [row("Depositors' price", m.minimum ? ethUsd(m.minimum) : "not set"), row("Voted", `${m.voted} of 80 slots · 41 needed`)];
+    const p = [row("Depositors' price", m.minimum ? ethUsd(m.minimum) : "not set"), row("Voted", `${m.voted} of 80 slots · ${m.voted >= 41n ? "majority" : "41 needed"}`)];
     if (m.slots) {
       p.push(row("Your vote", m.pref ? ethUsd(m.pref) : "not voted"));
       if (m.canAct && m.pref) { const i = input("Your price (ETH)", formatEther(m.pref)); // first vote lives in the header
@@ -384,7 +392,8 @@ async function renderDrawer(ctx) {
       el("span", {}, S.account && x.who.toLowerCase() === S.account.toLowerCase() ? "you" : nameOf(ctx, x.who)),
       el("span", {}, eth(x.amt), !x.ok ? " · needs re-confirming" : m.minimum && x.amt < m.minimum ? " · below price" : "")))));
     if (m.canAct) {
-      const target = m.minimum && m.minimum > m.myBack ? m.minimum - m.myBack : 0n;
+      // Prefill only what would make it count: up to the price, unless it's already backed at the price.
+      const target = m.minimum && !m.ready && m.minimum > m.myBack ? m.minimum - m.myBack : 0n;
       const i = input(m.myBack ? "Add (ETH)" : "Amount (ETH)", target ? formatEther(target) : "");
       bk.push(el("div", { class: "inline" }, i, ghost(m.myBack ? "Add" : "Back", () => a.back(a.toWei(i.value)), "back")));
       if (m.myStale) bk.push(ghost(`Re-confirm my ${eth(m.myBack)} (free)`, a.reconfirm, "reconfirm"));
