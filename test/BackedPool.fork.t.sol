@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import {BackedPool} from "../src/BackedPool.sol";
-import {CreditStore} from "../src/CreditStore.sol";
+import {BackedStore} from "../src/BackedStore.sol";
 import {ICredits, ForkStatements} from "./CreditPool.fork.t.sol";
 import {deployBacked} from "./BackedPool.t.sol";
 
@@ -63,7 +63,7 @@ contract BackedPoolForkTest is Test {
         uint256 b0 = holder.balance;
         vm.prank(holder); pool.claim(0);
         assertEq(holder.balance - b0, proceeds);
-        assertEq(CreditStore(payable(address(pool.store()))).balanceOf(holder), 160);
+        assertEq(BackedStore(payable(address(pool.store()))).balanceOf(holder), 160);
         assertEq(pool.pendingReturns(whale), 0.5 ether);
     }
 

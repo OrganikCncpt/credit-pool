@@ -2,13 +2,13 @@
 pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {BackedPool} from "../src/BackedPool.sol";
-import {CreditStore} from "../src/CreditStore.sol";
+import {BackedStore} from "../src/BackedStore.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 
 function deployBacked(address credits, address statements, address assembler, address feed, uint256 opensAt, address feeRecipient)
     returns (BackedPool pool)
 {
-    CreditStore store = new CreditStore(5 ether);
+    BackedStore store = new BackedStore(5 ether);
     pool = new BackedPool(credits, statements, assembler, feed, opensAt, feeRecipient, address(store));
     store.setPool(address(pool));
 }
@@ -39,7 +39,7 @@ contract ReenteringAssembler {
 }
 
 contract BackedPoolTest is Test {
-    MockCredits credits; MockStatements stmts; MockFeed feed; BackedPool pool; CreditStore store;
+    MockCredits credits; MockStatements stmts; MockFeed feed; BackedPool pool; BackedStore store;
     address treasury = makeAddr("bp-treasury");
     address alice = makeAddr("bp-alice"); address bob = makeAddr("bp-bob"); address carol = makeAddr("bp-carol");
     address whale = makeAddr("bp-whale"); address whale2 = makeAddr("bp-whale2"); address bidder = makeAddr("bp-bidder");
@@ -53,7 +53,7 @@ contract BackedPoolTest is Test {
         feed = new MockFeed(2500e8);
         opensAt = block.timestamp + 1 days;
         pool = deployBacked(address(credits), address(stmts), address(stmts), address(feed), opensAt, treasury);
-        store = CreditStore(payable(address(pool.store())));
+        store = BackedStore(payable(address(pool.store())));
         address[6] memory us = [alice, bob, carol, whale, whale2, bidder];
         for (uint256 i; i < 6; ++i) {
             vm.deal(us[i], 100 ether);
@@ -232,7 +232,7 @@ contract BackedPoolTest is Test {
 
     /// A pool whose store points elsewhere can't start auctions or redeem (audit L-2).
     function test_UnlinkedStoreRefused() public {
-        CreditStore other = new CreditStore(1 ether); // never linked to p2
+        BackedStore other = new BackedStore(1 ether); // never linked to p2
         BackedPool p2 = new BackedPool(address(credits), address(stmts), address(stmts), address(feed), opensAt, treasury, address(other));
         vm.prank(alice); credits.setApprovalForAll(address(p2), true);
         uint256[] memory ids = _give(alice, 80);

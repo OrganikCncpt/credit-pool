@@ -165,3 +165,5 @@ body.sending .batch button, body.sending #deposit, body.sending #collect-all, bo
 .accept-meter { position: relative; height: 8px; background: var(--line); }
 .accept-meter i { position: absolute; inset: 0 auto 0 0; background: var(--warn); transition: width .3s; }
 .accept-meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); }
+.treasury-ctl { border-top: 1px dashed var(--line); padding-top: 8px; margin-top: 2px; display: flex; flex-direction: column; gap: 6px; }
+.treasury-ctl .backing-label { color: var(--ok); }

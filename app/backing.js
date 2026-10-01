@@ -60,6 +60,17 @@ export const BACKED_ABI = parseAbi([
 ]);
 
 // Contract enum → the names the rest of the site uses ("Settled" = sold and delivered).
+// The store's treasury side (BackedStore): owner-only backing within a per-batch cap.
+export const TREASURY_ABI = parseAbi([
+  "function owner() view returns (address)",
+  "function treasuryBalance() view returns (uint256)",
+  "function maxTreasuryBid() view returns (uint256)",
+  "function backBatch(uint256 batchId, uint256 amount, uint256 expectedTotal)",
+  "function unbackBatch(uint256 batchId)",
+  "function collectRefund()",
+  "error NotFull()", "error NotDepositor()", "error AboveMinimum()", "error OverCap()", "error PriceMoved()",
+]);
+
 export const BACKED_STATES = ["Filling", "Full", "Auction", "Decide", "Settled"];
 const LABEL = { Filling: "Filling", Full: "Needs backing", Auction: "Auction", Decide: "Deciding", Settled: "Sold" };
 export const stateLabel = (s, backed) => (s === "Full" && backed ? "Ready to auction" : LABEL[s] ?? s);
@@ -92,6 +103,7 @@ export const BACKED_TIPS = {
   redeemBacked: "You hold all 80 slots: burn them into a Statement straight to your wallet. No auction, no fee.",
   deposit: "Moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. You can withdraw until an auction starts; " +
     "they burn only if the batch sells, and then each earns 2 SCREDIT.",
+  treasuryBack: "Owner only. Backs this batch from the store treasury, up to the per-batch cap and never above the depositors' own minimum. Raising the cap takes 3 days.",
   claim: "Sends your share of the sale to your wallet: your slots ÷ 80 of the price. Sales carry no fee.",
 };
 
@@ -118,7 +130,8 @@ export function applyBackedCopy(el) {
   const sb = document.getElementById("store-blurb");
   const safe = [...document.querySelectorAll(".safety li")].find((li) => li.textContent.startsWith("During assembly"));
   if (safe) safe.textContent = "Nothing burns until a sale is locked in. The burn, the delivery to the buyer and the payout happen in one all-or-nothing step: if any part fails, it's all undone and the buyer is refunded. Jack's Statements contract can only reach the 80 Credits being sold.";
-  if (sb) sb.textContent = "Statements the store holds, auctioned for SCREDIT only (never ETH). Every bid also pays a small platform fee in ETH.";
+  if (sb) sb.textContent = "Statements the store treasury won by backing batches, auctioned for SCREDIT only (never ETH). The treasury (75% of deposit fees) backs full batches, " +
+    "capped per batch and never above the depositors' own minimum; outbid, it gets its ETH back. Every SCREDIT bid also pays a small platform fee in ETH.";
   const faq = document.getElementById("faq");
   const q = (sum, text) => el("details", {}, el("summary", {}, sum), el("p", {}, text));
   faq?.querySelector("h2")?.after(
@@ -137,7 +150,9 @@ export function applyBackedCopy(el) {
 // ctx: the app's helpers (S, el, read, readFresh, send, eth, ethUsd, short, dur, now, toWei,
 // confirmStep, toast, mosaicButton, bidHistory, bidList, whoDetails, PER).
 export async function backedCard(ctx, b, mineOnly) {
-  const { S, el, read, readFresh, send, eth, ethUsd, short, dur, now, toWei, confirmStep, toast, PER } = ctx;
+  const { S, el, read, readFresh, send, eth, ethUsd, dur, now, toWei, confirmStep, toast, PER } = ctx;
+  // The store's treasury shows by name wherever an address would.
+  const short = (a) => (S.store && a.toLowerCase() === S.store.toLowerCase() ? "store treasury" : ctx.short(a));
   const me = S.account;
   const [info, auction, best, minimum, backers, slots, pref, claimed, myBacking, opensAt] = await Promise.all([
     read("batchInfo", [b]), read("auctions", [b]), read("bestBacking", [b]), read("majorityMinimum", [b]),
@@ -224,6 +239,7 @@ export async function backedCard(ctx, b, mineOnly) {
       }, "", "back")));
       if (myBack) backing.append(btn(`Take back my ${eth(myBack)}`, () => send(`Unback #${b}`, "withdrawBacking", [b]), "ghost", "unback"));
     }
+    if (canAct && S.treasuryOwner && state === "Full" && depositors > 1n) backing.append(await treasuryControl(ctx, b, minimum));
   }
 
   // ── depositor votes: Filling and Full ──
@@ -346,6 +362,41 @@ export async function backedCard(ctx, b, mineOnly) {
   );
   S.cards.set(cacheKey, { sig, el: card });
   return card;
+}
+
+// Owner-only: back this batch from the store treasury. The contract re-checks every limit.
+async function treasuryControl(ctx, b, minimum) {
+  const { S, el, read, send, eth, toWei, confirmStep, toast } = ctx;
+  const [[current], cap, bal] = await Promise.all([
+    read("backings", [b, S.store]), read("maxTreasuryBid", [], S.store, TREASURY_ABI), read("treasuryBalance", [], S.store, TREASURY_ABI),
+  ]);
+  const limit = minimum && minimum < cap ? minimum : cap;
+  const room = limit > current ? limit - current : 0n;
+  const i = el("input", { type: "number", step: "any", min: "0", placeholder: "Treasury (ETH)", value: room ? formatEther(room < bal ? room : bal) : "" });
+  const box = el("div", { class: "treasury-ctl" },
+    el("span", { class: "backing-label" }, "Store treasury · owner"),
+    el("span", { class: "muted small" }, `Backing ${eth(current)} · limit ${eth(limit)}${minimum && minimum < cap ? " (the depositors' minimum)" : " (per-batch cap)"} · treasury holds ${eth(bal)}`),
+    el("div", { class: "row" }, i,
+      el("button", { "data-tip": "treasuryBack", onclick: async () => {
+        const v = toWei(i.value);
+        if (!v) return toast("Enter an amount in ETH", true);
+        const total = current + v;
+        if (total > limit) return toast(`The treasury can back at most ${eth(limit, 6)} here`, true);
+        const ok = await confirmStep(`Back batch #${b} from the treasury?`, [
+          `Moves ${eth(v, 6)} of treasury ETH into the pool, for a total treasury backing of ${eth(total, 6)}.`,
+          "If it opens the auction and nobody outbids it, the Statement comes to the store, ready to list for SCREDIT.",
+          "Outbid, expired or unwound: the ETH comes back to the treasury (Collect).",
+          "If the backing changed before this lands, it's refused.",
+        ], "Back from treasury");
+        if (ok) send(`Treasury backs #${b}`, "backBatch", [b, v, total], undefined, S.store, TREASURY_ABI);
+      } }, "Back from treasury")),
+  );
+  // The minimum rule is checked when the treasury backs (store audit Info-1): if depositors lower
+  // their minimum afterwards, say so, so the owner can return the difference before a start.
+  if (current && minimum && current > minimum) box.append(el("p", { class: "next warn" },
+    `The depositors' minimum dropped to ${eth(minimum)}, below the treasury's ${eth(current)} backing. Return it and back again at the new minimum if you don't want to pay more than they ask.`));
+  if (current) box.append(el("button", { class: "ghost", onclick: () => send(`Treasury unbacks #${b}`, "unbackBatch", [b], undefined, S.store, TREASURY_ABI) }, `Return ${eth(current)} to treasury`));
+  return box;
 }
 
 function nextStepBacked(ctx, x) {

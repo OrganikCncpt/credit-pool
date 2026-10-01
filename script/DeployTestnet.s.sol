@@ -5,6 +5,7 @@ import {CreditPool, AggregatorV3Interface} from "../src/CreditPool.sol";
 import {Credits} from "../external/credits/Credits.sol";
 import {CreditStore} from "../src/CreditStore.sol";
 import {BackedPool} from "../src/BackedPool.sol";
+import {BackedStore} from "../src/BackedStore.sol";
 import {ForkStatements, ICredits} from "../test/CreditPool.fork.t.sol";
 
 /// Testnet only: passes the real Chainlink feed through with the price multiplied by `scale`,
@@ -32,7 +33,8 @@ contract ScaledFeed is AggregatorV3Interface {
 /// TESTERS:    comma-separated wallets to receive Credits (default: the deployer).
 /// COUNTS:     Credits for each tester, same order (default: PER_TESTER each, or all seeds split evenly).
 /// FEE_SCALE:  every $ amount (deposit fee, $0.25 bid fee) ÷ FEE_SCALE (default 1; 100 → $0.02/$0.01 per Credit).
-/// MAX_TREASURY_BID: cap for the store's buy-unsold bids (default 0.01 ETH).
+/// MAX_TREASURY_BID: per-purchase cap on treasury spending (buy-unsold bids, or with BACKED=1 the
+///             treasury's total backing of one batch) (default 0.01 ETH).
 /// FUND_WEI:   ETH sent to each tester other than the deployer, for gas (default 0).
 /// BACKED:     1 deploys BackedPool (sell first: backed auctions, nothing burns until a sale locks in)
 ///             instead of the burn-first CreditPool (default 0).
@@ -89,11 +91,14 @@ contract DeployTestnet is Script {
 
         if (feeScale > 1) feed = address(new ScaledFeed(AggregatorV3Interface(feed), int256(feeScale)));
         ForkStatements stmts = new ForkStatements(ICredits(address(credits)));
-        CreditStore store = new CreditStore(vm.envOr("MAX_TREASURY_BID", uint256(0.01 ether)));
-        address pool = vm.envOr("BACKED", uint256(0)) == 1
-            ? address(new BackedPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient, address(store)))
-            : address(new CreditPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient, address(store)));
-        store.setPool(pool);
+        bool backed = vm.envOr("BACKED", uint256(0)) == 1;
+        uint256 cap = vm.envOr("MAX_TREASURY_BID", uint256(0.01 ether));
+        address store = backed ? address(new BackedStore(cap)) : address(new CreditStore(cap));
+        address pool = backed
+            ? address(new BackedPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient, store))
+            : address(new CreditPool(address(credits), address(stmts), address(stmts), feed, block.timestamp, feeRecipient, store));
+        CreditStore(payable(store)).setPool(pool); // same setPool on both stores
+        require(address(CreditStore(payable(store)).pool()) == pool, "store not linked"); // audit L-2
         if (fund > 0) {
             for (uint256 i; i < testers.length; ++i) {
                 if (testers[i] == deployer) continue;
@@ -110,7 +115,7 @@ contract DeployTestnet is Script {
         console.log("pool:", pool);
         console.log("pool kind:", vm.envOr("BACKED", uint256(0)) == 1 ? "BackedPool" : "CreditPool");
         console.log("vault:", address(CreditPool(payable(pool)).vault()));
-        console.log("store:", address(store));
+        console.log("store:", store);
         console.log("fee scale ($1 /):", feeScale);
         console.log("fee, 1 Credit (wei):", CreditPool(payable(pool)).depositFeeFor(1));
         console.log("fee, 6 Credits (wei):", CreditPool(payable(pool)).depositFeeFor(6));

@@ -2,7 +2,7 @@ import {
   createPublicClient, createWalletClient, custom, http, parseAbi, formatEther, parseEther, defineChain,
 } from "./vendor/viem.js"; // viem 2.56.8, bundled locally: no third-party code at runtime
 import { DEPLOYMENTS, DEFAULT_CHAIN } from "./config.js";
-import { BACKED_ABI, BACKED_STATES, BACKED_FILTERS, BACKED_TIPS, backedCard, applyBackedCopy } from "./backing.js";
+import { BACKED_ABI, BACKED_STATES, BACKED_FILTERS, BACKED_TIPS, TREASURY_ABI, backedCard, applyBackedCopy } from "./backing.js";
 
 // ───────────────────────── ABIs ─────────────────────────
 const POOL_ABI = parseAbi([
@@ -333,6 +333,10 @@ async function init() {
   if (S.dep.credits && S.credits.toLowerCase() !== S.dep.credits.toLowerCase()) {
     return notice(`The pool at ${S.pool} doesn't use the real Credits contract. Not loading it.`);
   }
+  if (S.backed && S.store && S.account && !S.viewOnly) {
+    const owner = await tryRead("owner", [], S.store, TREASURY_ABI);
+    S.treasuryOwner = !!owner && owner.toLowerCase() === S.account.toLowerCase();
+  }
   const blk = await S.pub.getBlock();
   S.clockSkew = Number(blk.timestamp) - Math.floor(Date.now() / 1000);
 
@@ -435,6 +439,10 @@ const ERROR_TEXT = {
   AuctionOver: "That store auction has ended.",
   NotListed: "That Statement isn't up for auction in the store.",
   NonTransferable: "SCREDIT can't be transferred.",
+  AboveMinimum: "The treasury can't back above the depositors' own minimum.",
+  OverCap: "That's over the treasury's per-batch cap or its balance.",
+  PriceMoved: "The treasury's backing changed since you looked. Review it and try again.",
+  NotFull: "The treasury only backs full batches.",
   NotBacked: "This batch needs a backer before its auction can start.",
   BackingTooLow: "That backing is too low: at least 80 wei, and above the lowest of the 10 backers when the list is full.",
   BackingChanged: "The backing or the minimum changed since you looked. Review the new numbers and try again.",
@@ -535,7 +543,7 @@ async function renderStats() {
     stat(String(open), "batches filled so far"),
     el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
     stat(fee == null ? "unavailable" : ethFee(fee * 2n), fallback ? "fee per Credit (fixed fallback: price feed offline)" : `fee per Credit (${feeUsd(2)}; ${feeUsd(1)} each for ${BULK_MIN}+)`),
-    ...(treasury == null ? [] : [stat(eth(treasury, 4), S.backed ? "store treasury (75% of fees)" : "store treasury (buys unsold Statements)")]),
+    ...(treasury == null ? [] : [stat(eth(treasury, 4), S.backed ? "store treasury (75% of fees; backs batches)" : "store treasury (buys unsold Statements)")]),
     stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, S.backed ? "auctions" : "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
@@ -1200,7 +1208,11 @@ async function renderStore() {
   S.points = mine ?? 0n;
   $("points").hidden = mine == null;
   $("points").textContent = `${mine ?? 0n} SCREDIT`;
-  $("store-meta").textContent = `Treasury ${eth(treasury, 4)} · bid fee ${feeUsd(0.25)}${fee ? ` (≈ ${ethFee(fee)})` : ""}${mine != null ? ` · you have ${mine} SCREDIT` : ""}`;
+  const owed = S.backed ? await tryRead("pendingReturns", [S.store]) : null;
+  $("store-meta").replaceChildren();
+  if (owed) $("store-meta").append(el("button", { class: "link", onclick: () => send("Collect treasury refunds", "collectRefund", [], undefined, S.store, TREASURY_ABI) },
+    `collect ${eth(owed)} back into the treasury`), " · ");
+  $("store-meta").append(`Treasury ${eth(treasury, 4)} · bid fee ${feeUsd(0.25)}${fee ? ` (≈ ${ethFee(fee)})` : ""}${mine != null ? ` · you have ${mine} SCREDIT` : ""}`);
 
   // Everything ever listed (Listed events, scanned incrementally) plus anything the store holds now.
   S.storeScan ??= { from: S.dep.deployBlock || 0n, sids: new Set() };
@@ -1217,7 +1229,8 @@ async function renderStore() {
 
   const cards = (await Promise.all([...S.storeScan.sids].map((sid) => storeCard(sid, fee)))).filter(Boolean);
   $("store").replaceChildren(...(cards.length ? cards
-    : [el("p", { class: "muted" }, "Nothing in the store yet. The treasury only buys Statements whose auction ended with no bids, at the minimum the depositors' majority voted.")]));
+    : [el("p", { class: "muted" }, S.backed ? "Nothing in the store yet. Statements arrive here when a treasury backing wins its auction."
+      : "Nothing in the store yet. The treasury only buys Statements whose auction ended with no bids, at the minimum the depositors' majority voted.")]));
 }
 
 async function storeCard(sid, fee) {

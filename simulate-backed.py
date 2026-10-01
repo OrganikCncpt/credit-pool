@@ -6,13 +6,16 @@ tester wallet as TESTERS:
     python3 simulate-backed.py <burner-addresses.txt> [tester-address]
 
 Leaves every backed-auction state to look at:
-  #0–4   sold at or above the minimum (#0–2 collected, #3–4 waiting to collect)
+  #0–3   sold at or above the minimum (#0–2 collected, #3 waiting to collect)
+  #4     won by the store treasury's backing → listed in the store for SCREDIT, with point bids
   #5–6   sold by majority acceptance in the 24h window
   #7     window expired: bidder refunded, nothing burned, backed again
   #8–9   deciding now (#8 is 40 short of... one acceptance away: the tester's 40 slots sell it)
   #10–14 live auctions with rival bids
   #15–17 full, backed, votes in: anyone can start the auction
-  #18–21 full, waiting for a backer
+  #18    backed by the store treasury · #19 live auction led by the treasury
+  #20–21 full, waiting for a backer
+The store's ownership moves to the tester (local demo only) so the owner's treasury controls show.
   open batch at 50/80
 """
 import json, random, re, subprocess, sys, time, urllib.request
@@ -65,6 +68,10 @@ price = int(raw(FEED, "latestRoundData()")[66:130], 16)
 rpc("anvil_setCode", FEED, json.load(open("out/Mocks.sol/MockFeed.json"))["deployedBytecode"]["object"])
 rpc("anvil_setStorageAt", FEED, "0x" + "0" * 64, "0x" + format(price, "064x"))
 fee = lambda n: call(POOL, "depositFeeFor(uint256)", n)
+STORE = addr(POOL, "store()")
+OWNER = addr(STORE, "owner()")
+# Testnet fees are cents, so the treasury holds little: top it up (local demo only) so it can back.
+rpc("anvil_setBalance", STORE, hex(int(rpc("eth_getBalance", STORE, "latest"), 16) + 2 * E // 10))
 print(f"pool {POOL} (BackedPool) · fee for 40: {fee(40)} wei")
 
 for b in B + ([TESTER] if TESTER else []): rpc("anvil_setBalance", b, hex(3 * E))
@@ -101,6 +108,10 @@ def bids(n, k, to=None):
 print("round 1: #0–4 sell at or above the minimum; #5–7 end below it")
 for n in range(8):
     vote(n, 10, 20) if n < 5 else vote(n, 60, 90)       # 0.010–0.019 vs 0.060–0.089 ETH
+    if n == 4:  # the treasury backs at exactly the depositors' minimum; nobody outbids it
+        m = call(POOL, "majorityMinimum(uint256)", n)
+        send(OWNER, STORE, "backBatch(uint256,uint256,uint256)", n, m, m)
+        start(n); continue
     back(n, random.choice(outsiders), random.randrange(4, 8))  # 0.004–0.007 ETH
     if n % 2: back(n, random.choice(outsiders), random.randrange(2, 4))  # a second, lower backer
     start(n)
@@ -137,9 +148,22 @@ print("round 3: #10–14 live auctions with rival bids")
 for n in range(10, 15):
     vote(n, 10, 30); back(n, random.choice(outsiders), random.randrange(4, 9)); start(n); bids(n, random.randrange(1, 5))
 rpc("evm_increaseTime", 3 * 3600); rpc("evm_mine")
-print("#15–17 full, backed, votes in · #18–21 waiting for a backer")
+print("#15–17 full, backed, votes in · #18 treasury-backed · #19 treasury leads · #20–21 waiting")
+send(OWNER, STORE, "backBatch(uint256,uint256,uint256)", 18, 6 * E // 1000, 6 * E // 1000)
+send(OWNER, STORE, "backBatch(uint256,uint256,uint256)", 19, 4 * E // 1000, 4 * E // 1000)
+start(19)
 for n in range(15, 18):
     vote(n, 10, 30); back(n, random.choice(outsiders), random.randrange(5, 12))
     if n == 16: back(n, random.choice(outsiders), 3)
 send(B[0], POOL, "sweepFees()", gas=500_000)
+sid4 = call(POOL, "batchInfo(uint256)", 4, word=3)
+send(OWNER, STORE, "list(uint256,uint256)", sid4, 20, gas=300_000)
+bf = call(STORE, "bidFee()")
+for who, pts in [(deps(0)[0], 20), (deps(1)[1], 40), (deps(0)[0], 60)]:  # points earned at burn
+    send(who, STORE, "bid(uint256,uint256)", sid4, pts, value=bf, gas=300_000)
+print(f"#4 won by the treasury → Statement #{sid4} listed in the store, 3 SCREDIT bids")
+if TESTER:  # local demo only: hand the store to the tester so its owner controls show
+    send(OWNER, STORE, "transferOwnership(address)", TESTER, gas=200_000)
+    send(TESTER, STORE, "acceptOwnership()", gas=200_000)
+    print(f"store owner → tester {TESTER}")
 print(f"\ndone · fees swept · tester {TESTER or '(none)'}")
