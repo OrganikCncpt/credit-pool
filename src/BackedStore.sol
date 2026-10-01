@@ -31,8 +31,8 @@ interface IBackedPool {
 ///         2. The treasury: 75% of every deposit fee. Its only outflow is backBatch: an
 ///            owner-triggered backing of a full pool batch (the pool's opening bid if it's the best),
 ///            capped per batch by maxTreasuryBid and never above the depositors' own majority
-///            minimum. Depositors still decide: the batch sells to the treasury only if nobody
-///            outbids it and the price meets their minimum or a majority accepts it.
+///            minimum. An auction only opens at or above that minimum, so in practice the treasury
+///            backs at exactly the depositors' price, and wins only if nobody outbids it.
 ///            TRUST: the owner decides which batches to back and for how much, within that cap.
 ///            Raising the cap takes CAP_RAISE_DELAY to apply, so depositors can see it coming.
 ///         3. The store auction: Statements the treasury won are auctioned for SCREDIT only.
@@ -196,7 +196,7 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
         emit TreasuryUnbacked(b);
     }
 
-    /// @notice Pull everything the pool owes the treasury (outbid or evicted backings, expired or
+    /// @notice Pull everything the pool owes the treasury (outbid, withdrawn or evicted backings,
     ///         unwound sales) back into it. Anyone can call.
     function collectRefund() external nonReentrant {
         if (pool.pendingReturns(address(this)) != 0) pool.withdrawRefund();

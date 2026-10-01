@@ -86,27 +86,27 @@ contract BackedStoreTest is Test {
         assertEq(stmts.ownerOf(sid), bidder);
     }
 
-    function test_ExpiredAndUnwoundRoundsRefundTheTreasury() public {
-        _fill(); // no votes → no majority minimum → decide window
+    function test_UnwoundRoundRefundsTheTreasury() public {
+        _fill(); _votes(1 ether);
         store.backBatch(0, 1 ether, 1 ether);
         pool.startAuction(0, 1 ether);
-        _end(0); pool.settle(0);
-        (,,, uint64 e) = pool.auctions(0); vm.warp(e);
-        pool.expire(0);
-        store.collectRefund();
-        assertEq(store.treasuryBalance(), 30 ether);
-        // again, but the assembly fails at the accepting step: everything unwinds, treasury refunded
-        store.backBatch(0, 1 ether, 1 ether);
-        pool.startAuction(0, 1 ether);
-        _end(0); pool.settle(0);
-        (,,,,, uint64 r,) = pool.batchInfo(0);
-        stmts.setCap(0);
-        vm.prank(alice); pool.acceptBid(0, r, address(store), 1 ether);
-        vm.prank(carol); pool.acceptBid(0, r, address(store), 1 ether);
+        _end(0);
+        stmts.setCap(0); // the assembly fails at settle: everything unwinds, treasury refunded
+        pool.settle(0);
         assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Full));
         store.collectRefund();
         assertEq(store.treasuryBalance(), 30 ether);
         assertEq(credits.balanceOf(address(pool)), 80);
+    }
+
+    /// With option 1 the treasury's backing opens an auction only at the depositors' price.
+    function test_TreasuryBelowMinimumCantOpen() public {
+        _fill(); _votes(1 ether);
+        store.backBatch(0, 0.5 ether, 0.5 ether);
+        vm.expectRevert(BackedPool.BelowMinimum.selector);
+        pool.startAuction(0, 0.5 ether);
+        store.backBatch(0, 0.5 ether, 1 ether); // top up to the minimum
+        pool.startAuction(0, 1 ether);
     }
 
     function test_UnbackReturnsToTreasury() public {

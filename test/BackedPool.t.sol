@@ -77,10 +77,16 @@ contract BackedPoolTest is Test {
     }
     function _state(uint256 b) internal view returns (BackedPool.BatchState s) { (s,,,,,,) = pool.batchInfo(b); }
     function _round(uint256 b) internal view returns (uint64 r) { (,,,,, r,) = pool.batchInfo(b); }
+    /// Starts the auction; if the depositors haven't voted, alice (40) and bob (30) vote the best backing.
     function _start(uint256 b) internal {
         (, uint256 open) = pool.bestBacking(b);
+        if (pool.majorityMinimum(b) == 0) _vote(b, open);
         vm.warp(opensAt > block.timestamp ? opensAt : block.timestamp);
         pool.startAuction(b, open);
+    }
+    function _vote(uint256 b, uint256 price) internal {
+        vm.prank(alice); pool.setReserve(b, price);
+        vm.prank(bob); pool.setReserve(b, price);
     }
     function _end(uint256 b) internal { (,,, uint64 e) = pool.auctions(b); vm.warp(e); }
     /// Every wei the pool holds is owed to someone (I9).
@@ -192,6 +198,7 @@ contract BackedPoolTest is Test {
     function test_StartOpeningAtLeastWhatCallerSaw() public {
         _fill();
         vm.prank(whale); pool.back{value: 1 ether}(0);
+        _vote(0, 1 ether);
         vm.warp(opensAt);
         vm.prank(whale); pool.back{value: 1}(0); // "front-run" top-up
         pool.startAuction(0, 1 ether);           // still starts: the opening only went up
@@ -203,6 +210,7 @@ contract BackedPoolTest is Test {
         _fill();
         vm.prank(whale); pool.back{value: 1 ether}(0);
         vm.prank(whale2); pool.back{value: 0.5 ether}(0);
+        _vote(0, 0.5 ether);
         vm.warp(opensAt);
         vm.prank(whale); pool.withdrawBacking(0);
         vm.expectRevert(BackedPool.BackingChanged.selector);
@@ -226,6 +234,7 @@ contract BackedPoolTest is Test {
         assertEq(pool.pendingReturns(sy[0]) + pool.pendingReturns(sy[9]) > 0, true);
         (address who, uint256 amt) = pool.bestBacking(0);
         assertEq(who, whale); assertEq(amt, 0.5 ether);
+        vm.prank(alice); pool.setReserve(0, 0.5 ether); // 79 slots
         vm.warp(opensAt);
         pool.startAuction(0, 0.5 ether);
     }
@@ -291,22 +300,22 @@ contract BackedPoolTest is Test {
         vm.prank(alice); pool.setReserve(0, 2 ether);
         vm.prank(carol); pool.setReserve(0, 1 ether); // 10 slots @1, 40 @2 → 50 ≥ 41 at 2 ether
         assertEq(pool.majorityMinimum(0), 2 ether);
-        vm.prank(whale); pool.back{value: 1 ether}(0);
+        vm.prank(whale); pool.back{value: 2 ether}(0);
         _start(0);
-        vm.prank(bidder); pool.bid{value: 2 ether}(0);
-        assertEq(pool.pendingReturns(whale), 1 ether); // backer outbid → refunded
+        vm.prank(bidder); pool.bid{value: 2.1 ether}(0);
+        assertEq(pool.pendingReturns(whale), 2 ether); // backer outbid → refunded
         _end(0);
         assertEq(credits.balanceOf(address(pool)), 80); // nothing burned yet (I1)
         pool.settle(0);
         (BackedPool.BatchState s,,, uint256 sid, uint256 proceeds,,) = pool.batchInfo(0);
         assertEq(uint8(s), uint8(BackedPool.BatchState.Sold));
         assertEq(stmts.ownerOf(sid), bidder);
-        assertEq(proceeds, 2 ether);
+        assertEq(proceeds, 2.1 ether);
         assertEq(credits.balanceOf(address(pool)), 0);
         // split by slots
-        uint256 a0 = alice.balance; vm.prank(alice); pool.claim(0); assertEq(alice.balance - a0, 1 ether);
-        uint256 b0 = bob.balance;   vm.prank(bob);   pool.claim(0); assertEq(bob.balance - b0, 0.75 ether);
-        uint256 c0 = carol.balance; vm.prank(carol); pool.claim(0); assertEq(carol.balance - c0, 0.25 ether);
+        uint256 a0 = alice.balance; vm.prank(alice); pool.claim(0); assertEq(alice.balance - a0, 1.05 ether);
+        uint256 b0 = bob.balance;   vm.prank(bob);   pool.claim(0); assertEq(bob.balance - b0, 0.7875 ether);
+        uint256 c0 = carol.balance; vm.prank(carol); pool.claim(0); assertEq(carol.balance - c0, 0.2625 ether);
         vm.prank(carol); vm.expectRevert(BackedPool.NothingToClaim.selector); pool.claim(0);
         // points: 2 per Credit, at burn
         assertEq(store.balanceOf(alice), 80); assertEq(store.balanceOf(bob), 60); assertEq(store.balanceOf(carol), 20);
@@ -346,92 +355,96 @@ contract BackedPoolTest is Test {
         pool.settle(0);
     }
 
-    // ───────── auction → decide ─────────
-    function _toDecide() internal {
+    // ───────── option 1: auctions open only at or above the depositors' minimum ─────────
+    function test_NoAuctionWithoutMajorityMinimum() public {
         _fill();
-        vm.prank(alice); pool.setReserve(0, 5 ether);
-        vm.prank(bob); pool.setReserve(0, 5 ether);
+        vm.prank(whale); pool.back{value: 5 ether}(0);
+        vm.prank(bob); pool.setReserve(0, 1 ether); // 30 slots: not a majority
+        vm.warp(opensAt);
+        vm.expectRevert(BackedPool.NoMinimum.selector);
+        pool.startAuction(0, 5 ether);
+    }
+
+    /// A lowball backing can't start an auction, so it can't lock the depositors' Credits.
+    function test_LowballCantStartOrLockCredits() public {
+        (uint256[] memory a,,) = _fill();
+        _vote(0, 1 ether);
+        vm.prank(whale); pool.back{value: 0.001 ether}(0);
+        vm.warp(opensAt);
+        vm.expectRevert(BackedPool.BelowMinimum.selector);
+        pool.startAuction(0, 0.001 ether);
+        // the depositors stay free to leave
+        uint256[] memory one = new uint256[](1); one[0] = a[0];
+        vm.prank(alice); pool.withdraw(one);
+        assertEq(credits.ownerOf(a[0]), alice);
+    }
+
+    /// The best backing must meet the minimum; a lower one never opens even if it's the only one.
+    function test_BestBackingMustMeetMinimum() public {
+        _fill();
+        _vote(0, 1 ether);
+        vm.prank(whale); pool.back{value: 0.9 ether}(0);
+        vm.warp(opensAt);
+        vm.expectRevert(BackedPool.BelowMinimum.selector);
+        pool.startAuction(0, 0.9 ether);
+        vm.prank(whale2); pool.back{value: 1 ether}(0); // exactly the minimum
+        pool.startAuction(0, 1 ether);
+        (address hb, uint256 amt, uint256 minimum,) = pool.auctions(0);
+        assertEq(hb, whale2); assertEq(amt, 1 ether); assertEq(minimum, 1 ether);
+    }
+
+    /// To sell for less, the majority lowers its vote: then the lower backing can open.
+    function test_MajorityLowersVoteToSellCheaper() public {
+        _fill();
+        _vote(0, 2 ether);
+        vm.prank(whale); pool.back{value: 1 ether}(0);
+        vm.warp(opensAt);
+        vm.expectRevert(BackedPool.BelowMinimum.selector);
+        pool.startAuction(0, 1 ether);
+        _vote(0, 1 ether);
+        pool.startAuction(0, 1 ether);
+        _end(0); pool.settle(0);
+        (BackedPool.BatchState st,,,,uint256 proceeds,,) = pool.batchInfo(0);
+        assertEq(uint8(st), uint8(BackedPool.BatchState.Sold));
+        assertEq(proceeds, 1 ether);
+    }
+
+    /// Votes changed during the auction don't move its minimum, and every started auction sells.
+    function test_StartedAuctionAlwaysSellsVotesDuringAuctionIgnored() public {
+        _fill();
+        _vote(0, 1 ether);
         vm.prank(whale); pool.back{value: 1 ether}(0);
         _start(0);
-        vm.prank(bidder); pool.bid{value: 2 ether}(0);
-        _end(0);
-        pool.settle(0);
-        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Decide));
+        _vote(0, 50 ether); // too late: the price was fixed when it opened
+        _end(0); pool.settle(0);
+        (,,, uint256 sid,,,) = pool.batchInfo(0);
+        assertEq(stmts.ownerOf(sid), whale);
     }
 
-    function test_DecideMajorityAcceptsSells() public {
-        _toDecide();
-        uint64 r = _round(0);
-        vm.prank(alice); pool.acceptBid(0, r, bidder, 2 ether); // 40 slots: not yet
-        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Decide));
-        vm.prank(alice); vm.expectRevert(BackedPool.WrongBatchState.selector);
-        pool.acceptBid(0, r, bidder, 2 ether); // no double count
-        vm.prank(carol); pool.acceptBid(0, r, bidder, 2 ether); // 50 → sells
-        (BackedPool.BatchState s,,, uint256 sid,,,) = pool.batchInfo(0);
-        assertEq(uint8(s), uint8(BackedPool.BatchState.Sold));
-        assertEq(stmts.ownerOf(sid), bidder);
-    }
-
-    function test_AcceptBindsExactBid() public {
-        _toDecide();
-        uint64 r = _round(0);
-        vm.startPrank(alice);
-        vm.expectRevert(BackedPool.BidChanged.selector); pool.acceptBid(0, r, bidder, 1.9 ether);
-        vm.expectRevert(BackedPool.BidChanged.selector); pool.acceptBid(0, r, whale, 2 ether);
-        vm.expectRevert(BackedPool.BidChanged.selector); pool.acceptBid(0, r + 1, bidder, 2 ether);
-        vm.stopPrank();
-        vm.prank(whale); vm.expectRevert(BackedPool.NotDepositor.selector);
-        pool.acceptBid(0, r, bidder, 2 ether);
-    }
-
-    function test_NoBidsDuringDecide_NoWithdrawDuringAuctionOrDecide() public {
+    function test_NoWithdrawOrBackingDuringAuction() public {
         (uint256[] memory a,,) = _fill();
         vm.prank(whale); pool.back{value: 1 ether}(0);
         _start(0);
         uint256[] memory one = new uint256[](1); one[0] = a[0];
         vm.prank(alice); vm.expectRevert(BackedPool.WrongBatchState.selector); pool.withdraw(one);
-        _end(0); pool.settle(0); // no quorum → decide
-        vm.prank(alice); vm.expectRevert(BackedPool.WrongBatchState.selector); pool.withdraw(one);
-        vm.prank(bidder); vm.expectRevert(BackedPool.WrongBatchState.selector); pool.bid{value: 5 ether}(0);
+        vm.prank(whale2); vm.expectRevert(BackedPool.WrongBatchState.selector); pool.back{value: 2 ether}(0);
     }
 
-    function test_ExpireRefundsEveryoneNothingBurns() public {
-        _toDecide();
-        uint64 r = _round(0);
-        vm.prank(alice); pool.acceptBid(0, r, bidder, 2 ether); // 40, one short
-        vm.expectRevert(BackedPool.WrongBatchState.selector);
-        pool.expire(0); // window still open
-        (,,, uint64 e) = pool.auctions(0);
-        vm.warp(e);
-        vm.prank(carol); vm.expectRevert(BackedPool.WrongBatchState.selector);
-        pool.acceptBid(0, r, bidder, 2 ether); // too late
-        pool.expire(0);
+    function test_NewRoundAfterUnwind() public {
+        _fill();
+        vm.prank(whale); pool.back{value: 1 ether}(0);
+        _start(0); _end(0);
+        stmts.setCap(0);
+        pool.settle(0);                      // unwinds: Full again, whale refunded
         assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Full));
-        assertEq(pool.pendingReturns(bidder), 2 ether);
         assertEq(pool.pendingReturns(whale), 1 ether);
-        assertEq(credits.balanceOf(address(pool)), 80);
-        // Credits are free again
-        uint256[] memory ids = pool.batchCredits(0);
-        uint256[] memory one = new uint256[](1);
-        for (uint256 i; i < ids.length; ++i) if (pool.depositorOf(ids[i]) == carol) { one[0] = ids[i]; break; }
-        vm.prank(carol); pool.withdraw(one);
-        assertEq(credits.ownerOf(one[0]), carol);
-    }
-
-    function test_NewRoundAfterExpireOldAcceptancesDontCount() public {
-        _toDecide();
-        uint64 r1 = _round(0);
-        vm.prank(alice); pool.acceptBid(0, r1, bidder, 2 ether);
-        (,,, uint64 e) = pool.auctions(0);
-        vm.warp(e); pool.expire(0);
+        stmts.setCap(type(uint256).max);
         vm.prank(whale2); pool.back{value: 1 ether}(0);
+        uint64 r1 = _round(0);
         _start(0);
+        assertEq(_round(0), r1 + 1);
         _end(0); pool.settle(0);
-        uint64 r2 = _round(0);
-        assertEq(r2, r1 + 1);
-        vm.prank(carol); pool.acceptBid(0, r2, whale2, 1 ether); // 10, alice's 40 from r1 don't carry
-        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Decide));
-        assertEq(pool.acceptTally(0, r2), 10);
+        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Sold));
     }
 
     // ───────── all-or-nothing finalize ─────────
@@ -463,12 +476,11 @@ contract BackedPoolTest is Test {
         uint256 fee = p2.depositFeeFor(80);
         vm.prank(alice); p2.deposit{value: fee}(ids);
         vm.prank(whale); p2.back{value: 1 ether}(0);
+        vm.prank(alice); p2.setReserve(0, 1 ether);
         vm.warp(opensAt);
         p2.startAuction(0, 1 ether);
         (,,, uint64 e) = p2.auctions(0); vm.warp(e);
-        p2.settle(0);
-        uint64 r = 1;
-        vm.prank(alice); p2.acceptBid(0, r, whale, 1 ether); // 80 slots → finalize → assembler re-enters → unwind
+        p2.settle(0); // finalize → assembler re-enters → unwind
         (BackedPool.BatchState s,,,,,,) = p2.batchInfo(0);
         assertEq(uint8(s), uint8(BackedPool.BatchState.Full));
         assertEq(credits.balanceOf(address(p2)), 80);

@@ -23,23 +23,29 @@ unsold Statement: no Credits, no ETH, money stuck. That forced the 30-day fallba
 buy-unsold role and a long tail of edge cases (CP-29..58).
 
 **New rule: nothing burns until a sale is locked in, and every sale starts from a real, funded bid.**
-- Credits stay in the pool, unburned and attributable, until a buyer's ETH is committed and either
-  - meets the depositors' majority minimum, or
-  - the majority explicitly accepts it.
+- Credits stay in the pool, unburned and attributable, until a buyer's ETH is committed at or above the
+  depositors' majority price. An auction can only open with a backing at that price or more, so every
+  auction that starts ends in a sale (or a full unwind if the burn itself fails).
 - Then the burn, delivery and payment happen together in one transaction.
 - With no sale, depositors keep an exit with their Credits intact, and every bidder gets their ETH back.
 
 ## 2. The flow
 
 ```
-Filling ─fill─▶ Full ──(backer posts ETH)──▶ Backed ──start──▶ AUCTION (24h, backing = opening bid)
-   ▲             │ vote minimum (41/80)                          │
-   │             │ backers can post, raise, withdraw             ├─ high bid ≥ minimum ─────────────▶ FINALIZE
-   │             │                                               └─ high bid < minimum ─▶ ACCEPT WINDOW (24h)
-   │             │                                                     ├─ majority accepts high bid ─▶ FINALIZE
-   └─ withdraw ──┘ (no auction live; resets votes)                      └─ no acceptance ─▶ refund all, back to Full
+Filling ─fill─▶ Full ── vote a price (41/80) ── backing ≥ price ──start──▶ AUCTION (24h, backing = opening bid)
+   ▲             │ backers can post, raise, withdraw at any amount             │
+   │             │ (below the price they just wait; they can't start anything)  └─ ends ─▶ FINALIZE (sells)
+   └─ withdraw ──┘ (no auction live; clears votes)                                         │ burn fails
+                                                                                ◀── unwind: refund, back to Full
 FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to depositors (pull) → points
 ```
+
+**Revision (2026-09-30, "option 1"):** the first build let any backing open an auction, and a 24h accept
+window handled auctions that ended below the price. That let a lowball backer start auctions nobody
+wanted and lock depositors' Credits for up to 48h, repeatedly, for gas only. Now an auction opens only
+with a majority price and a backing at or above it. The accept window, `acceptBid` and `expire` are
+gone. A majority that wants to sell for less lowers its price before the auction instead of accepting
+after it.
 
 1. **Filling.** Deposits and withdrawals work as today. Fees are unchanged ($2/Credit, or $1 each for 6+),
    split 25% platform / 75% treasury.
@@ -49,28 +55,23 @@ FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to deposi
    amount**.
    - Several backers can back the same batch.
    - A backer can withdraw their backing any time **except** while it is the opening bid of a live
-     auction, or the high bid in an accept window. Raising or posting a backing is only possible while the
-     batch is Filling or Full (as built: no new backings during an auction or accept window; bidding
-     is the way in then).
+     auction. Raising or posting a backing is only possible while the batch is Filling or Full (no new
+     backings during an auction; bidding is the way in then). A backing below the majority price is
+     allowed and simply waits: it can't open an auction.
    - At most 10 backers per batch. A newcomer displaces a stale backing (made for an older set of
      Credits) first, otherwise must beat the lowest current one (internal audit M-2).
    - Backing can be posted while the batch is still filling, as an early signal. It only counts once the
      batch is Full.
-4. **Start.** Anyone can start the auction once the batch is Full **and backed**.
+4. **Start.** Anyone can start the auction once the batch is Full, has a majority price, **and its best
+   current backing is at or above that price** (`NoMinimum` / `BelowMinimum` otherwise).
    - The highest backing becomes the opening bid. That backer's ETH is now committed.
    - The print order and composition freeze.
    - The other backings stay posted, untouched, as fallbacks for a later round.
 5. **Auction (24h).** Anyone, including depositors, can bid at least 5% above the current high bid. Bids
    in the last 15 minutes add 15 minutes. Outbid bidders, including the backer, are refunded (pull).
-6. **Auction ends:**
-   - **High bid ≥ the majority minimum:** FINALIZE runs, and anyone can call it.
-   - **High bid < the minimum:** a **24-hour accept window** opens. Depositors vote to accept that exact high
-     bid (bidder, amount and round are all bound). When more than 40 of 80 slots accept, FINALIZE runs.
-     The high bidder stays committed during the window. The maximum lock is 24h auction + 24h window + any
-     anti-snipe extensions.
-   - **The window expires without acceptance:** the high bidder is refunded, nothing burns, and the batch
-     returns to Full. Fallback backings are still posted. Depositors can re-vote, wait for better backing
-     and run another round, or withdraw their Credits.
+6. **Auction ends:** FINALIZE runs (anyone can call it). The auction opened at or above the price and
+   bids only rise, so the sale always meets it. Depositors' Credits are locked for at most the 24h auction
+   plus anti-snipe extensions, and only at a price their majority set.
 7. **FINALIZE (atomic).** In one transaction:
    1. burn the batch's 80 Credits through the AssemblyVault;
    2. verify one new Statement arrived;
@@ -79,8 +80,8 @@ FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to deposi
    5. award points (2 per burned Credit).
 
    If any step fails, **everything unwinds** (§5).
-8. **Exit.** While no auction or accept window is live, a depositor of a Full batch can withdraw. The batch
-   goes back to Filling, and all votes and acceptances for it are cleared (the composition changed).
+8. **Exit.** While no auction is live, a depositor of a Full batch can withdraw. The batch goes back to
+   Filling, and all votes for it are cleared (the composition changed).
    Backings remain but must be re-matched to the new composition before a start.
 
 ## 3. Safety invariants (must hold always; each gets a handler invariant, and I1–I3 a formal proof)
@@ -88,13 +89,13 @@ FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to deposi
 | # | Invariant |
 |---|---|
 | I1 | Every Credit the pool holds belongs to exactly one depositor in exactly one unsold batch. A Credit leaves the pool only to its own depositor (withdraw) or burned inside FINALIZE of **its own** batch. |
-| I2 | **Nothing burns** except in FINALIZE for (a) an auction high bid ≥ the majority minimum, or (b) a high bid the majority accepted within its 24h window. |
-| I3 | Pool ETH ≥ Σ posted backings + live high bids + bids in accept windows + pending refunds + unclaimed proceeds + fees owed. |
+| I2 | **Nothing burns** except in FINALIZE for an auction that opened with a backing ≥ the majority price (so its high bid ≥ that price). |
+| I3 | Pool ETH ≥ Σ posted backings + live high bids + pending refunds + unclaimed proceeds + fees owed. |
 | I4 | A backer's or bidder's ETH leaves only to (a) that same address, via withdraw or refund, or (b) that batch's depositors, via FINALIZE. Nobody else, ever. |
-| I5 | An acceptance binds to `(round, bidder, amount, compositionNonce)`. A sale pays exactly that amount, and nobody can swap, lower or cancel it while committed. |
+| I5 | A sale pays exactly the auction's high bid, and nobody can swap, lower or cancel a committed bid. |
 | I6 | A failed burn never loses a Credit or a wei: a full unwind to the pre-FINALIZE state, and the buyer is refunded. |
-| I7 | No auction starts without a funded backing, and the opening bid is the highest backing at that moment. |
-| I8 | Votes, backings and acceptances bind to a composition nonce. Any change to a batch's Credit set invalidates them. |
+| I7 | No auction starts without a majority price and a funded backing at or above it; the opening bid is the highest current backing at that moment. |
+| I8 | Backings bind to a composition nonce, and reopening a full batch clears its votes. Any change to a batch's Credit set invalidates them. |
 | I9 | Each batch finalizes at most once. Each Statement is delivered to exactly one buyer and backs exactly one batch. |
 | I10 | Neither owner can move Credits, backings, bids or proceeds, or pause any of it. |
 
@@ -103,11 +104,10 @@ FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to deposi
 | Attack | Defence |
 |---|---|
 | Backer pulls out as the auction starts | Start reads and locks the highest backing in the same transaction; a withdraw in the same block either lands first (a different backing opens it) or reverts |
-| Bait-and-switch in the accept window (lower or cancel the high bid) | The high bid is committed until acceptance or expiry; acceptance binds the exact `(round, bidder, amount, nonce)` |
-| Majority accepts a lowball from its own sock puppet | The 24h open auction came first: anyone could have outbid. The minority is outvoted exactly as with today's minimum-price vote. The site shows price per Credit and the OpenSea floor (display only). |
-| A 1-wei "backing" to start an auction and waste a round | Allowed ("any amount"): depositors simply don't accept, it expires, and everything is refunded. Cost to the attacker: gas plus locked capital. Optionally the site hides backings below a display threshold. |
+| Majority lowers its price to a sock puppet's lowball | Still a 24h open auction: anyone can outbid. The minority is outvoted exactly as with the minimum-price vote. The site shows price per Credit. |
+| A lowball "backing" to start an auction and lock Credits | **Can't start**: an auction needs a backing ≥ the majority price (`BelowMinimum`). The lowball just waits, and depositors stay free to withdraw. |
 | Backing spam (many tiny backings) | Only the top N backings per batch are stored (a new backing must beat the lowest to enter); escrow ties up capital |
-| Swapping Credits after start or acceptance | Composition nonce (I8); arrangement frozen at start; withdrawals blocked while an auction or window is live |
+| Swapping Credits after start | Composition nonce (I8); arrangement frozen at start; withdrawals blocked while an auction is live |
 | Reentrancy (bidder, backer, depositor, fee wallet, Statements) | `nonReentrant` on every entry point; pull payments; checks-effects-interactions; FINALIZE internals `onlySelf` |
 | Griefing the burn (Jack's contract rejects, cap reached, gas) | FINALIZE is an all-or-nothing self-call; on revert everything is undone (§5) |
 | Buyer is a contract that can't receive the NFT | Plain `transferFrom` delivery (no receiver hook), so settlement can't be blocked |
@@ -151,7 +151,7 @@ Custody depends on this being all-or-nothing.
   - keeps the SCREDIT auction of Statements it holds;
   - the treasury acquires Statements by **backing** batches like anyone else: owner-triggered, with the
     same per-purchase cap and 3-day raise delay;
-  - the treasury's backing is just another bid, and depositors still decide.
+  - the treasury's backing is just another bid, capped at the depositors' price, so it opens only at exactly that price.
 - **Frontend (batch card):**
   - the minimum vote;
   - a "Back this batch" button with the current backings (per Credit and against the floor);

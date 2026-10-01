@@ -13,7 +13,7 @@ KEY=0x$(openssl rand -hex 32)
 DEPLOYER=$(cast wallet address --private-key "$KEY")
 
 pkill -x anvil 2>/dev/null || true; sleep 1
-anvil --fork-url "$RPC_UP" --chain-id 31337 --gas-limit 60000000 --silent >/dev/null 2>&1 &
+nohup anvil --fork-url "$RPC_UP" --chain-id 31337 --gas-limit 60000000 --silent >/dev/null 2>&1 & disown   # detached: survives the launching shell
 for _ in $(seq 1 30); do cast block-number --rpc-url $R >/dev/null 2>&1 && break; sleep 1; done
 cast rpc anvil_setBalance "$DEPLOYER" 0x3635C9ADC5DEA00000 --rpc-url $R >/dev/null   # 1000 ETH
 BN=$(( $(cast block-number --rpc-url $R) + 1 ))

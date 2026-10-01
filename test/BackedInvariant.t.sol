@@ -12,7 +12,7 @@ contract BackedHandler is Test {
     address[] public actors;
     uint256 nextId = 1;
     uint256 public batchesTouched = 1;
-    uint256 public sold; uint256 public unwound; uint256 public expired;
+    uint256 public sold; uint256 public unwound;
 
     constructor(BackedPool p, MockCredits c, MockStatements s) {
         pool = p; credits = c; stmts = s;
@@ -100,19 +100,6 @@ contract BackedHandler is Test {
         try pool.settle(b) { _count(b, u); } catch {}
     }
 
-    function accept(uint256 who, uint256 bs) external {
-        uint256 b = _batch(bs);
-        (,,,,, uint64 r,) = pool.batchInfo(b);
-        (address hb, uint256 amt,,) = pool.auctions(b);
-        uint256 u = _unwindCount(b);
-        vm.prank(_actor(who));
-        try pool.acceptBid(b, r, hb, amt) { _count(b, u); } catch {}
-    }
-
-    function expire(uint256 bs) external {
-        try pool.expire(_batch(bs)) { ++expired; } catch {}
-    }
-
     function claim(uint256 who, uint256 bs) external {
         vm.prank(_actor(who));
         try pool.claim(_batch(bs)) {} catch {}
@@ -148,6 +135,11 @@ contract BackedHandler is Test {
         } else if (s == BackedPool.BatchState.Full) {
             (, uint256 open) = pool.bestBacking(b);
             if (open == 0) { vm.prank(a); pool.back{value: 1 ether}(b); (, open) = pool.bestBacking(b); }
+            uint256 m = pool.majorityMinimum(b);
+            if (m == 0 || m > open) { // depositors agree the backing's price
+                address[] memory ds = pool.batchDepositors(b);
+                for (uint256 i; i < ds.length; ++i) { vm.prank(ds[i]); pool.setReserve(b, open); }
+            }
             pool.startAuction(b, open);
         } else if (s == BackedPool.BatchState.Auction) {
             (,,, uint64 e) = pool.auctions(b);
@@ -155,23 +147,6 @@ contract BackedHandler is Test {
             uint256 u = _unwindCount(b);
             pool.settle(b);
             _count(b, u);
-        } else if (s == BackedPool.BatchState.Decide) {
-            (address hb, uint256 amt,, uint64 e) = pool.auctions(b);
-            (,,,,, uint64 r,) = pool.batchInfo(b);
-            if (coin % 2 == 0 || block.timestamp >= e) {
-                if (block.timestamp < e) vm.warp(e); pool.expire(b); ++expired;
-            } else {
-                address[] memory ds = pool.batchDepositors(b);
-                for (uint256 i; i < ds.length; ++i) {
-                    (BackedPool.BatchState now_,,,,,,) = pool.batchInfo(b);
-                    if (now_ != BackedPool.BatchState.Decide) break;
-                    if (pool.accepted(b, r, ds[i])) continue;
-                    vm.prank(ds[i]);
-                    pool.acceptBid(b, r, hb, amt);
-                }
-                (BackedPool.BatchState after_,,,,,,) = pool.batchInfo(b);
-                if (after_ == BackedPool.BatchState.Sold) ++sold; else if (after_ == BackedPool.BatchState.Full) ++unwound;
-            }
         }
     }
 
@@ -232,7 +207,7 @@ contract BackedInvariantTest is Test {
             (BackedPool.BatchState s, uint256 filled,,,,,) = pool.batchInfo(b);
             if (s == BackedPool.BatchState.Sold) assertEq(filled, 80);
             else held += filled;
-            if (s == BackedPool.BatchState.Auction || s == BackedPool.BatchState.Decide) assertEq(filled, 80);
+            if (s == BackedPool.BatchState.Auction) assertEq(filled, 80);
         }
         assertEq(credits.balanceOf(address(pool)), held);
         assertEq(credits.balanceOf(address(pool.vault())), 0);
@@ -245,8 +220,11 @@ contract BackedInvariantTest is Test {
         for (uint256 b; b < n; ++b) {
             (BackedPool.BatchState s,,,,,,) = pool.batchInfo(b);
             (address who, uint256 hb,,) = pool.auctions(b);
-            if (s == BackedPool.BatchState.Auction || s == BackedPool.BatchState.Decide) {
+            if (s == BackedPool.BatchState.Auction) {
+                (,, uint256 minimum,) = pool.auctions(b);
                 assertTrue(who != address(0)); assertGe(hb, 80);
+                assertGt(minimum, 0);   // option 1: only with a majority minimum
+                assertGe(hb, minimum);  // and the price always meets it
             } else {
                 assertEq(hb, 0);
             }
@@ -261,7 +239,7 @@ contract BackedInvariantTest is Test {
             if (s == BackedPool.BatchState.Sold) ++soldNow;
         }
         console2.log("sold", h.sold(), "unwound", h.unwound());
-        console2.log("expired", h.expired(), "soldNow", soldNow);
+        console2.log("soldNow", soldNow);
     }
 }
 
