@@ -8,6 +8,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: http://127.0.0.1:8545 http://localhost:8545; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>credit.pool</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="backed.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2300a3e0'/%3E%3Crect x='9' width='7' height='7' fill='%23e0007a'/%3E%3Crect y='9' width='7' height='7' fill='%23f5d000'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%23111'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -25,6 +26,11 @@
 
 <main>
   <div id="demo" class="demo" hidden></div>
+
+  <section id="inbox" class="inbox" hidden aria-live="polite">
+    <div class="section-head"><h2>For you <span id="inbox-count" class="count"></span></h2></div>
+    <ol id="inbox-list"></ol>
+  </section>
 
   <section id="claims" class="claims" hidden aria-live="polite">
     <div class="section-head">
@@ -85,6 +91,12 @@
     </div>
     <p class="muted small" id="store-blurb">Statements the store treasury bought, auctioned for SCREDIT only (never ETH). The treasury only buys Statements whose auction ended with no bids, at the minimum the depositors' majority voted.</p>
     <div id="store" class="gallery"></div>
+  </section>
+
+  <section id="treasury-section" class="treasury" hidden>
+    <div class="section-head"><h2>Treasury</h2><span id="treasury-meta" class="muted small"></span></div>
+    <p class="muted small">Priced batches still waiting for a backer, and the treasury's own backings. It backs at most the depositors' price.</p>
+    <div id="treasury-list"></div>
   </section>
 
   <section>
@@ -153,6 +165,13 @@
       <button value="ok" id="confirm-ok">Confirm</button>
     </div>
   </form>
+</dialog>
+<dialog id="drawer" aria-labelledby="drawer-title">
+  <div class="drawer-head">
+    <h2 id="drawer-title"></h2>
+    <form method="dialog"><button class="ghost" aria-label="Close">Close</button></form>
+  </div>
+  <div id="drawer-body"></div>
 </dialog>
 <dialog id="viewer" aria-labelledby="viewer-title">
   <div class="viewer-head">

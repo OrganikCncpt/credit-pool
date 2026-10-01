@@ -2,7 +2,7 @@ import {
   createPublicClient, createWalletClient, custom, http, parseAbi, formatEther, parseEther, defineChain,
 } from "./vendor/viem.js"; // viem 2.56.8, bundled locally: no third-party code at runtime
 import { DEPLOYMENTS, DEFAULT_CHAIN } from "./config.js";
-import { BACKED_ABI, BACKED_STATES, BACKED_FILTERS, BACKED_TIPS, TREASURY_ABI, backedCard, applyBackedCopy } from "./backing.js";
+import { BACKED_ABI, BACKED_STATES, BACKED_FILTERS, BACKED_TIPS, TREASURY_ABI, backedCard, applyBackedCopy, renderInbox, refreshDrawer, renderTreasury } from "./backing.js";
 
 // ───────────────────────── ABIs ─────────────────────────
 const POOL_ABI = parseAbi([
@@ -300,6 +300,7 @@ async function init() {
     S.abi = BACKED_ABI; S.states = BACKED_STATES; S.filters = BACKED_FILTERS;
     Object.assign(TIPS, BACKED_TIPS);
     applyBackedCopy(el);
+    document.body.classList.add("backed");
   }
   if (S.chainId !== 31337 && !S.dep.deployBlock) console.warn("config.js: set deployBlock, or 'Your batches' may fail on public RPCs");
 
@@ -503,6 +504,7 @@ async function refresh() {
     await renderAllPage(true);
     await renderGallery();
     await renderStore();
+    if (S.backed) await Promise.all([renderTreasury(backingCtx), refreshDrawer(backingCtx)]);
     hideTip();
     S.lastRefresh = Date.now();
   } finally {
@@ -776,7 +778,8 @@ async function renderMyBatches() {
     logs.push(...more.flat());
   }
   const ids = [...new Set(logs.map((l) => l.args.batchId))].sort((a, b) => (a < b ? 1 : -1));
-  renderClaims(ids);
+  if (S.backed) await renderInbox(backingCtx, ids); // the inbox replaces "Ready to collect"
+  else renderClaims(ids);
   const cards = (await Promise.all(ids.map((b) => batchCard(b, true)))).filter(Boolean);
   box.replaceChildren(...(cards.length ? cards : [el("p", { class: "muted" }, "You haven't deposited yet. Pick Credits above to join the open batch.")]));
 }
