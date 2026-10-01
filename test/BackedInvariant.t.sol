@@ -12,7 +12,7 @@ contract BackedHandler is Test {
     address[] public actors;
     uint256 nextId = 1;
     uint256 public batchesTouched = 1;
-    uint256 public sold; uint256 public unwound;
+    uint256 public sold; uint256 public unwound; uint256 public expired;
 
     constructor(BackedPool p, MockCredits c, MockStatements s) {
         pool = p; credits = c; stmts = s;
@@ -77,10 +77,22 @@ contract BackedHandler is Test {
         try pool.withdrawBacking(_batch(bs)) {} catch {}
     }
 
-    function start(uint256 bs) external {
+    function start(uint256 who, uint256 bs) external {
+        vm.prank(_actor(who));
+        try pool.startAuction(_batch(bs)) {} catch {}
+    }
+
+    function accept(uint256 who, uint256 bs) external {
         uint256 b = _batch(bs);
-        (, uint256 open) = pool.bestBacking(b);
-        try pool.startAuction(b, open) {} catch {}
+        (,,,,, uint64 r,) = pool.batchInfo(b);
+        (,,,, address backer, uint256 backing) = pool.auctions(b);
+        uint256 u = _unwindCount(b);
+        vm.prank(_actor(who));
+        try pool.acceptBacking(b, r, backer, backing) { _count(b, u); } catch {}
+    }
+
+    function expire(uint256 bs) external {
+        try pool.expire(_batch(bs)) { ++expired; } catch {}
     }
 
     function bid(uint256 who, uint256 bs, uint256 extra) external {
@@ -135,18 +147,37 @@ contract BackedHandler is Test {
         } else if (s == BackedPool.BatchState.Full) {
             (, uint256 open) = pool.bestBacking(b);
             if (open == 0) { vm.prank(a); pool.back{value: 1 ether}(b); (, open) = pool.bestBacking(b); }
-            uint256 m = pool.majorityMinimum(b);
-            if (m == 0 || m > open) { // depositors agree the backing's price
-                address[] memory ds = pool.batchDepositors(b);
-                for (uint256 i; i < ds.length; ++i) { vm.prank(ds[i]); pool.setReserve(b, open); }
+            address[] memory ds = pool.batchDepositors(b);
+            if (pool.majorityMinimum(b) == 0) { // depositors set a price: sometimes above the backing
+                uint256 price = coin % 2 == 0 ? open : open * 2;
+                for (uint256 i; i < ds.length; ++i) { vm.prank(ds[i]); pool.setReserve(b, price); }
             }
-            pool.startAuction(b, open);
+            uint64 cd = pool.cooldownUntil(b);
+            if (block.timestamp < cd) vm.warp(cd);
+            vm.prank(ds[0]); pool.startAuction(b);
         } else if (s == BackedPool.BatchState.Auction) {
-            (,,, uint64 e) = pool.auctions(b);
+            (,,, uint64 e,,) = pool.auctions(b);
             if (block.timestamp < e) vm.warp(e);
             uint256 u = _unwindCount(b);
             pool.settle(b);
             _count(b, u);
+        } else if (s == BackedPool.BatchState.Decide) {
+            (,,, uint64 e, address backer, uint256 backing) = pool.auctions(b);
+            (,,,,, uint64 r,) = pool.batchInfo(b);
+            if (coin % 2 == 0 || block.timestamp >= e) {
+                if (block.timestamp < e) vm.warp(e);
+                pool.expire(b); ++expired;
+            } else {
+                address[] memory ds = pool.batchDepositors(b);
+                for (uint256 i; i < ds.length; ++i) {
+                    (BackedPool.BatchState now_,,,,,,) = pool.batchInfo(b);
+                    if (now_ != BackedPool.BatchState.Decide) break;
+                    if (pool.accepted(b, r, ds[i])) continue;
+                    vm.prank(ds[i]); pool.acceptBacking(b, r, backer, backing);
+                }
+                (BackedPool.BatchState after_,,,,,,) = pool.batchInfo(b);
+                if (after_ == BackedPool.BatchState.Sold) ++sold; else if (after_ == BackedPool.BatchState.Full) ++unwound;
+            }
         }
     }
 
@@ -185,21 +216,18 @@ contract BackedInvariantTest is Test {
         uint256 n = h.batchesTouched() + 1;
         for (uint256 b; b < n; ++b) {
             (BackedPool.BatchState s,,,, uint256 proceeds,,) = pool.batchInfo(b);
-            (, uint256 hb,,) = pool.auctions(b);
-            owed += hb; // live or deciding high bid (0 otherwise)
+            (, uint256 hb,,,, uint256 backing) = pool.auctions(b);
+            owed += hb + backing; // a live high bid and the committed fallback offer
             for (uint256 i; i < as_.length; ++i) {
                 (uint256 amt,) = pool.backings(b, as_[i]);
                 owed += amt;
-                if (s == BackedPool.BatchState.Sold && !pool.claimed(b, as_[i])) {
-                    owed += proceeds * pool.slots(b, as_[i]) / 80;
-                }
+                if (s == BackedPool.BatchState.Sold && !pool.claimed(b, as_[i])) owed += proceeds * pool.slots(b, as_[i]) / 80;
             }
         }
         assertGe(address(pool).balance, owed);
-        assertLe(address(pool).balance - owed, 80 * n); // only rounding dust beyond what's owed
+        assertLe(address(pool).balance - owed, 80 * n);
     }
 
-    /// I1/I2: Credits are held for every unsold batch, none for sold ones, none left in the vault.
     function invariant_CreditsAccounted() public view {
         uint256 n = h.batchesTouched() + 1;
         uint256 held;
@@ -207,26 +235,30 @@ contract BackedInvariantTest is Test {
             (BackedPool.BatchState s, uint256 filled,,,,,) = pool.batchInfo(b);
             if (s == BackedPool.BatchState.Sold) assertEq(filled, 80);
             else held += filled;
-            if (s == BackedPool.BatchState.Auction) assertEq(filled, 80);
+            if (s == BackedPool.BatchState.Auction || s == BackedPool.BatchState.Decide) assertEq(filled, 80);
         }
         assertEq(credits.balanceOf(address(pool)), held);
         assertEq(credits.balanceOf(address(pool.vault())), 0);
-        assertEq(stmts.balanceOf(address(pool)), 0); // Statements always delivered
+        assertEq(stmts.balanceOf(address(pool)), 0);
     }
 
-    /// An auction or accept window always has a real high bidder with at least the backing floor.
+    /// Every running round has a price; any bid meets it; only a deciding round has a committed
+    /// offer, and that offer is below the price (anything at the price would have been a bid).
     function invariant_AuctionsBacked() public view {
         uint256 n = h.batchesTouched() + 1;
         for (uint256 b; b < n; ++b) {
             (BackedPool.BatchState s,,,,,,) = pool.batchInfo(b);
-            (address who, uint256 hb,,) = pool.auctions(b);
+            (address who, uint256 hb, uint256 minimum,, address backer, uint256 backing) = pool.auctions(b);
             if (s == BackedPool.BatchState.Auction) {
-                (,, uint256 minimum,) = pool.auctions(b);
-                assertTrue(who != address(0)); assertGe(hb, 80);
-                assertGt(minimum, 0);   // option 1: only with a majority minimum
-                assertGe(hb, minimum);  // and the price always meets it
-            } else {
+                assertGt(minimum, 0);
+                if (who != address(0)) assertGe(hb, minimum); else assertEq(hb, 0);
+                assertEq(backing, 0); assertEq(backer, address(0));
+            } else if (s == BackedPool.BatchState.Decide) {
+                assertGt(minimum, 0);
                 assertEq(hb, 0);
+                assertTrue(backer != address(0)); assertGe(backing, 80); assertLt(backing, minimum);
+            } else {
+                assertEq(hb, 0); assertEq(backing, 0);
             }
         }
     }
@@ -239,7 +271,7 @@ contract BackedInvariantTest is Test {
             if (s == BackedPool.BatchState.Sold) ++soldNow;
         }
         console2.log("sold", h.sold(), "unwound", h.unwound());
-        console2.log("soldNow", soldNow);
+        console2.log("expired", h.expired(), "soldNow", soldNow);
     }
 }
 

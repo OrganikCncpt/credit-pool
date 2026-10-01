@@ -57,7 +57,7 @@ body.backed .batches { grid-template-columns: repeat(auto-fill, minmax(280px, 1f
 .inline .primary-btn { width: auto; }
 
 /* five-step rail: Fill → Price → Backer → Auction → Sold */
-.brail { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+.brail { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
 .brail li { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .brail i { display: block; height: 3px; border-radius: 3px; background: var(--line); }
 .brail li.done i { background: var(--fg); }
@@ -128,3 +128,13 @@ body.backed .stile-top { padding-top: 10px !important; }
 body.backed .stile > span:last-child { padding-bottom: 12px; }
 body.backed .stile .tag { border: 0; border-radius: 999px; padding: 4px 8px; font: 600 10px/1 var(--mono); }
 body.backed .stile .tag.Settled { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+/* store cards share the tile style: give their actions the same inner margin as the text */
+body.backed .stile > button, body.backed .stile > .row { margin: 6px 12px 12px; }
+body.backed .stile > .row { display: flex; gap: 8px; }
+body.backed .stile > .row input { flex: 1; min-width: 0; width: auto; }
+body.backed .stile > span:has(+ button), body.backed .stile > span:has(+ .row) { padding-bottom: 0; }
+/* holders deciding on the backer's offer */
+.s-decide .btag, .dhead.s-decide .btag { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.accept-meter { position: relative; height: 8px; border-radius: 8px; background: var(--line); overflow: visible; }
+.accept-meter i { position: absolute; inset: 0 auto 0 0; border-radius: 8px; background: var(--warn); transition: width .3s; }
+.accept-meter b { position: absolute; top: -3px; bottom: -3px; left: 51.25%; width: 2px; background: var(--fg); }

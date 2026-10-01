@@ -11,15 +11,8 @@ interface IBackedPool {
     function feeRecipient() external view returns (address);
     function statements() external view returns (IERC721);
     function store() external view returns (address);
-    function batchInfo(uint256 b)
-        external
-        view
-        returns (uint8 state, uint256 filled, uint256 depositorCount, uint256 statementId, uint256 proceeds, uint64 round, uint64 nonce);
     function majorityMinimum(uint256 b) external view returns (uint256);
-    function backings(uint256 b, address who) external view returns (uint256 amount, uint64 nonce);
-    function back(uint256 b) external payable;
-    function withdrawBacking(uint256 b) external;
-    function reconfirm(uint256 b) external;
+    function sellToStore(uint256 b) external payable;
     function withdrawRefund() external;
     function pendingReturns(address who) external view returns (uint256);
 }
@@ -29,13 +22,13 @@ interface IBackedPool {
 ///         1. SCREDIT ("Store Credit"): non-transferable points. When a batch is burned into a
 ///            Statement, the pool awards each depositor 2 per Credit in it. They can't be sent, sold or approved;
 ///            they can only be bid here.
-///         2. The treasury: 75% of every deposit fee. Its only outflow is backBatch: an
-///            owner-triggered backing of a full pool batch (the pool's opening bid if it's the best),
-///            capped per batch by maxTreasuryBid and never above the depositors' own majority
-///            minimum. An auction only opens at or above that minimum, so in practice the treasury
-///            backs at exactly the depositors' price, and wins only if nobody outbids it.
-///            TRUST: the owner decides which batches to back and for how much, within that cap.
-///            Raising the cap takes CAP_RAISE_DELAY to apply, so depositors can see it coming.
+///         2. The treasury: 75% of every deposit fee. Its only outflow is buyUnsold: an
+///            owner-triggered purchase of a batch whose last auction round ended unsold (no bid at
+///            the price, holders didn't accept the backer), at exactly the depositors' majority price
+///            (which must also be the median of the votes cast), capped per purchase by
+///            maxTreasuryBid. It never backs batches.
+///            TRUST: the owner decides which unsold batches to buy, within that cap. Raising the cap
+///            takes CAP_RAISE_DELAY to apply, so depositors can see it coming.
 ///         3. The store auction: Statements the treasury won are auctioned for SCREDIT only.
 ///            Every bid also pays a $0.25 platform fee in ETH. Outbid points come back; the
 ///            winner's points are burned. These Statements never go back into the pool.
@@ -65,7 +58,7 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
     IERC721 public statements;
     uint256 public bidFees;         // ETH owed to the platform; everything else held is treasury
     uint256 public constant CAP_RAISE_DELAY = 3 days;
-    uint256 internal _maxTreasuryBid; // cap on the treasury's total backing of one batch
+    uint256 internal _maxTreasuryBid; // cap on what buyUnsold may pay for one Statement
     uint256 public pendingMaxTreasuryBid;
     uint64 public pendingMaxTreasuryBidAt;
     mapping(uint256 statementId => Listing) public listings;
@@ -74,8 +67,7 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
     event PoolSet(address pool);
     event MaxTreasuryBidSet(uint256 amount);
     event MaxTreasuryBidRaiseScheduled(uint256 amount, uint64 effectiveAt);
-    event TreasuryBacked(uint256 indexed batchId, uint256 amount, uint256 total);
-    event TreasuryUnbacked(uint256 indexed batchId);
+    event TreasuryBought(uint256 indexed batchId, uint256 price);
     event Listed(uint256 indexed statementId, uint256 reserve, uint64 endsAt);
     event StoreBid(uint256 indexed statementId, address indexed bidder, uint256 points, uint256 fee, uint64 endsAt);
     event StoreSettled(uint256 indexed statementId, address winner, uint256 points);
@@ -85,9 +77,6 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
     error NonTransferable();
     error NotPool();
     error PoolAlreadySet();
-    error NotFull();
-    error AboveMinimum();
-    error NoMinimum();
     error PriceMoved();
     error NotDepositor();
     error LengthMismatch();
@@ -171,58 +160,24 @@ contract BackedStore is ReentrancyGuard, Ownable2Step {
         }
     }
 
-    /// @notice Back a full batch from the treasury. `expectedTotal` is the treasury's total backing
-    ///         on this batch after the call, as the owner reviewed it: anything else reverts. The
-    ///         depositors must have a majority price first, and the total stays within maxTreasuryBid
-    ///         and that price: the treasury never offers more than the depositors themselves ask.
-    ///         Topping up (any amount) also re-confirms a backing after the batch's Credits changed.
-    function backBatch(uint256 b, uint256 amount, uint256 expectedTotal) external onlyOwner nonReentrant {
-        (uint8 state,, uint256 depositors,,,,) = pool.batchInfo(b);
-        if (state != 1) revert NotFull();                    // Full only: a batch whose Credits are final
-        if (depositors < 2) revert NotDepositor();          // never a sole 80-slot holder's batch (they can redeem)
-        (uint256 current,) = pool.backings(b, address(this));
-        uint256 total = current + amount;
-        if (total != expectedTotal) revert PriceMoved();
-        uint256 minimum = pool.majorityMinimum(b);
-        // No price yet: no auction can open, so a treasury backing would only sit there, and it
-        // could later open above whatever price the depositors then set (option-1 audit L).
-        if (minimum == 0) revert NoMinimum();
-        if (total > minimum) revert AboveMinimum();
-        if (total > maxTreasuryBid() || amount > treasuryBalance()) revert OverCap();
-        pool.back{value: amount}(b);
-        emit TreasuryBacked(b, amount, total);
+    /// @notice Buy an unsold batch at exactly the depositors' majority price. `expectedPrice` is the
+    ///         price the owner reviewed: if votes moved since, it reverts instead of paying something
+    ///         else. The pool checks the rest (last round unsold, nothing changed since, not a sole
+    ///         holder's batch, price = median of cast votes). The Statement comes here, ready to list.
+    function buyUnsold(uint256 b, uint256 expectedPrice) external onlyOwner nonReentrant {
+        uint256 price = pool.majorityMinimum(b);
+        if (price == 0 || price != expectedPrice) revert PriceMoved();
+        if (price > maxTreasuryBid() || price > treasuryBalance()) revert OverCap();
+        pool.sellToStore{value: price}(b);
+        emit TreasuryBought(b, price);
     }
 
-    /// @notice Re-confirm the treasury's backing after the batch's Credits changed, without adding ETH.
-    ///         Same rules as backBatch: a Full batch, not a sole holder's, with a depositors' price the
-    ///         backing doesn't exceed.
-    function reconfirmBatch(uint256 b) external onlyOwner nonReentrant {
-        (uint8 state,, uint256 depositors,,,,) = pool.batchInfo(b);
-        if (state != 1) revert NotFull();
-        if (depositors < 2) revert NotDepositor();
-        (uint256 current,) = pool.backings(b, address(this));
-        uint256 minimum = pool.majorityMinimum(b);
-        if (minimum == 0) revert NoMinimum();
-        if (current > minimum) revert AboveMinimum();
-        pool.reconfirm(b);
-        emit TreasuryBacked(b, 0, current);
-    }
-
-    /// @notice Take the treasury's backing on a batch back into the treasury (only while it isn't a
-    ///         running auction's opening bid; the pool enforces that).
-    function unbackBatch(uint256 b) external onlyOwner nonReentrant {
-        pool.withdrawBacking(b);
-        pool.withdrawRefund();
-        emit TreasuryUnbacked(b);
-    }
-
-    /// @notice Pull everything the pool owes the treasury (outbid, withdrawn or evicted backings,
-    ///         unwound sales) back into it. Anyone can call.
+    /// @notice Pull everything the pool owes the treasury (a purchase that unwound) back into it. Anyone can call.
     function collectRefund() external nonReentrant {
         if (pool.pendingReturns(address(this)) != 0) pool.withdrawRefund();
     }
 
-    /// @dev ETH arrives only from the pool: its fee sweep and returned backings.
+    /// @dev ETH arrives only from the pool: its fee sweep and refunds of unwound purchases.
     receive() external payable {
         if (msg.sender != address(pool)) revert NotPool();
     }

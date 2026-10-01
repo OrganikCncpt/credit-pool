@@ -77,3 +77,31 @@ The PoCs were re-run against the fixed contract: each fixed finding's PoC now fa
 - Access guards are consistent after the removal.
 - Owner powers are unchanged.
 - ETH accounting holds without `expire`.
+
+---
+
+# Backing redesign audits (2026-10-01)
+
+Two rounds of blind specialists, each finding backed by a Foundry PoC that was reproduced in the repo; every fix has a regression test.
+
+**Round 1** (fallback backing, depositor-only start, accept window, store buys unsold): state machine, game theory, and ETH/access specialists.
+
+| # | Finding | Severity | Resolution |
+|---|---|---|---|
+| R1-1 | A 41-slot holder sets a decoy price so nobody can bid, then accepts its sock's dust backing alone | High | Redesign: offers compete during the auction, so the holders vote on the best offer |
+| R1-2 | A committed backing above the price is undercut by a bid at the reserve | Medium | A backing at or above the price at start is the opening bid; bids must beat it by 5% |
+| R1-3 | A 1-slot depositor repeats 48h lock cycles with a dust backing | Medium | Rest doubles per consecutive unsold round (24h→48h→96h→192h) |
+| R1-4 | Front-running a start by withdrawing a good backing swaps in a worse fallback | Low | Nothing below the price is committed at start |
+
+**Round 2** (the redesign): game theory, and state machine plus ETH specialists.
+
+| # | Finding | Severity | Resolution |
+|---|---|---|---|
+| R2-1 | Fill the 10-place list with refundable socks, churn out the honest offer at the deadline, pull the socks, accept dust | High | Offers are binding while the auction runs (no withdraw until settle); during the auction a full list only takes a new best. `test_CapacityBlockThenWithdrawFails` |
+| R2-2 | 1-wei offer top-ups extend the auction forever (each is a "new best") | Medium | A late offer extends only with a 5% step, and never once someone has bid. `test_TinyTopUpsCantExtendForever` |
+| R2-3 | Withdraw + refill the same Credit resets the doubling rest | Medium | Reshuffling no longer resets the streak; it decays only after 7 idle days past a rest. `test_RestStreakSurvivesReshuffle_DecaysWithIdleTime` |
+| R2-4 | A failed store purchase shortens a long rest to 24h | Low | An unwind never shortens a running rest |
+
+**Accepted trade-off:** if nobody makes a better offer, a true majority (41+ slots) can still accept a low offer. That is the majority rule; the minority's protection is that anyone can outbid it during the 24h auction, and that offers are binding.
+
+**Checked sound (round 2):** every wei is credited once on every path; stale backings can never open or be decided; no batch can get stuck; extension arithmetic can't underflow; loops are bounded; enum consumers match.

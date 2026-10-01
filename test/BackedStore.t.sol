@@ -7,8 +7,8 @@ import {BackedStore} from "../src/BackedStore.sol";
 import {MockCredits, MockStatements, MockFeed} from "./Mocks.sol";
 import {deployBacked} from "./BackedPool.t.sol";
 
-/// Treasury backing (closes internal audit M-1): the store's 75% share of fees can back batches
-/// and always finds its way back, as a Statement or as ETH.
+/// The treasury buys unsold batches (no bid at the price, holders didn't accept the backer) at
+/// exactly the depositors' majority price, capped; it never backs batches.
 contract BackedStoreTest is Test {
     MockCredits credits; MockStatements stmts; MockFeed feed; BackedPool pool; BackedStore store;
     address treasury = makeAddr("bs-fees");
@@ -49,194 +49,127 @@ contract BackedStoreTest is Test {
     /// Batch 0 already holds carol's 40; alice 40 fills it.
     function _fill() internal returns (uint256[] memory a) { a = _deposit(alice, 40); }
     function _state(uint256 b) internal view returns (BackedPool.BatchState s) { (s,,,,,,) = pool.batchInfo(b); }
-    function _end(uint256 b) internal { (,,, uint64 e) = pool.auctions(b); vm.warp(e); }
+    function _ends(uint256 b) internal view returns (uint64 e) { (,,, e,,) = pool.auctions(b); }
     function _votes(uint256 price) internal {
         vm.prank(alice); pool.setReserve(0, price);
         vm.prank(carol); pool.setReserve(0, price);
     }
+    /// A round that ends unsold: a lowball backing, no bid, holders don't accept, it expires.
+    function _unsoldRound(uint256 b) internal {
+        vm.prank(whale); pool.back{value: 0.001 ether}(b);
+        vm.prank(alice); pool.startAuction(b);
+        vm.warp(_ends(b)); pool.settle(b);
+        vm.warp(_ends(b)); pool.expire(b);
+        assertTrue(pool.unsold(b));
+    }
 
-    function test_TreasuryBacksAndWinsStatementThenListsForPoints() public {
+    function test_TreasuryBuysUnsoldAtThePrice() public {
         _fill(); _votes(1 ether);
-        store.backBatch(0, 1 ether, 1 ether);
+        _unsoldRound(0);
+        store.buyUnsold(0, 1 ether);
+        (BackedPool.BatchState st,,, uint256 sid, uint256 proceeds,,) = pool.batchInfo(0);
+        assertEq(uint8(st), uint8(BackedPool.BatchState.Sold));
+        assertEq(stmts.ownerOf(sid), address(store));
+        assertEq(proceeds, 1 ether);
         assertEq(store.treasuryBalance(), 29 ether);
-        pool.startAuction(0, 1 ether);
-        _end(0); pool.settle(0);
-        (,,, uint256 sid,,,) = pool.batchInfo(0);
-        assertEq(stmts.ownerOf(sid), address(store)); // the treasury won: Statement in the store
-        store.list(sid, 10);                           // and it goes up for SCREDIT
-        uint256 bf = store.bidFee(); // read before the prank
-        vm.prank(alice); store.bid{value: bf}(sid, 80); // alice earned 80 points at burn
-        vm.warp(block.timestamp + 1 days);
-        store.settle(sid);
-        assertEq(stmts.ownerOf(sid), alice);
-        // depositors were paid the treasury's 1 ETH
         uint256 a0 = alice.balance; vm.prank(alice); pool.claim(0); assertEq(alice.balance - a0, 0.5 ether);
+        store.list(sid, 10);                          // straight into the SCREDIT store
+        uint256 bf = store.bidFee();
+        vm.prank(alice); store.bid{value: bf}(sid, 80); // alice earned 80 points at the burn
+        vm.warp(block.timestamp + 1 days); store.settle(sid);
+        assertEq(stmts.ownerOf(sid), alice);
     }
 
-    function test_OutbidTreasuryGetsEveryWeiBack() public {
+    function test_OnlyAfterAnUnsoldRound() public {
         _fill(); _votes(1 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        pool.startAuction(0, 1 ether);
-        vm.prank(bidder); pool.bid{value: 2 ether}(0);
-        assertEq(store.treasuryBalance(), 29 ether);
-        vm.prank(whale); store.collectRefund(); // anyone can pull it home
-        assertEq(store.treasuryBalance(), 30 ether);
-        _end(0); pool.settle(0);
-        (,,, uint256 sid,,,) = pool.batchInfo(0);
-        assertEq(stmts.ownerOf(sid), bidder);
+        vm.expectRevert(BackedPool.NotUnsold.selector);
+        store.buyUnsold(0, 1 ether);                  // never auctioned
+        vm.prank(whale); pool.back{value: 0.001 ether}(0);
+        vm.prank(alice); pool.startAuction(0);
+        vm.expectRevert(BackedPool.NotUnsold.selector);
+        store.buyUnsold(0, 1 ether);                  // auction running
     }
 
-    function test_UnwoundRoundRefundsTheTreasury() public {
+    function test_ReopeningClearsUnsold() public {
+        uint256[] memory a = _fill(); _votes(1 ether);
+        _unsoldRound(0);
+        uint256[] memory one = new uint256[](1); one[0] = a[0];
+        vm.prank(alice); pool.withdraw(one);
+        uint256[] memory fresh = _give(alice, 1);
+        uint256 fee = pool.depositFeeFor(1);
+        vm.prank(alice); pool.depositInto{value: fee}(0, fresh, 79);
+        vm.expectRevert(BackedPool.NotUnsold.selector);
+        store.buyUnsold(0, 1 ether);                  // different Credits now
+    }
+
+    function test_PinnedPrice() public {
         _fill(); _votes(1 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        pool.startAuction(0, 1 ether);
-        _end(0);
-        stmts.setCap(0); // the assembly fails at settle: everything unwinds, treasury refunded
-        pool.settle(0);
-        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Full));
-        store.collectRefund();
-        assertEq(store.treasuryBalance(), 30 ether);
-        assertEq(credits.balanceOf(address(pool)), 80);
+        _unsoldRound(0);
+        vm.expectRevert(BackedStore.PriceMoved.selector);
+        store.buyUnsold(0, 0.9 ether);
+        _votes(2 ether);                              // votes moved after the owner looked
+        vm.expectRevert(BackedStore.PriceMoved.selector);
+        store.buyUnsold(0, 1 ether);
+        store.buyUnsold(0, 2 ether);
     }
 
-    /// With option 1 the treasury's backing opens an auction only at the depositors' price.
-    function test_TreasuryBelowMinimumCantOpen() public {
-        _fill(); _votes(1 ether);
-        store.backBatch(0, 0.5 ether, 0.5 ether);
-        vm.expectRevert(BackedPool.BelowMinimum.selector);
-        pool.startAuction(0, 0.5 ether);
-        store.backBatch(0, 0.5 ether, 1 ether); // top up to the minimum
-        pool.startAuction(0, 1 ether);
-    }
-
-    function test_UnbackReturnsToTreasury() public {
-        _fill(); _votes(3 ether);
-        store.backBatch(0, 2 ether, 2 ether);
-        store.backBatch(0, 1 ether, 3 ether); // top up
-        store.unbackBatch(0);
-        assertEq(store.treasuryBalance(), 30 ether);
-        (uint256 amt,) = pool.backings(0, address(store));
-        assertEq(amt, 0);
-    }
-
-    function test_EvictedTreasuryBackingComesBack() public {
-        _fill(); _votes(1 ether);
-        store.backBatch(0, 0.1 ether, 0.1 ether);
-        for (uint256 i; i < 10; ++i) {
-            address x = makeAddr(string.concat("bs-backer", vm.toString(i)));
-            vm.deal(x, 1 ether);
-            vm.prank(x); pool.back{value: 0.2 ether}(0);
-        }
-        assertEq(pool.pendingReturns(address(store)), 0.1 ether);
-        store.collectRefund();
-        assertEq(store.treasuryBalance(), 30 ether);
-    }
-
-    // ───────── limits ─────────
-    function test_NeverAboveDepositorsMinimum() public {
-        _fill(); _votes(1 ether);
-        vm.expectRevert(BackedStore.AboveMinimum.selector);
-        store.backBatch(0, 1.5 ether, 1.5 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        vm.expectRevert(BackedStore.AboveMinimum.selector);
-        store.backBatch(0, 1, 1 ether + 1);
+    /// One small voter can't set the treasury's price while the others abstain (CreditPool CP-52).
+    function test_PivotalMinorityRefused() public {
+        _deposit(carol, 40);              // batch 0 full (carol 80)… use batch 1 for a 3-way split
+        _deposit(alice, 40); _deposit(bob, 39); _deposit(whale, 1);
+        vm.prank(alice); pool.setReserve(1, 1 ether);  // 40 slots
+        vm.prank(whale); pool.setReserve(1, 4 ether);  // 1 slot: tips the majority to 4
+        assertEq(pool.majorityMinimum(1), 4 ether);
+        assertEq(pool.votedMedian(1), 1 ether);
+        vm.prank(bidder); pool.back{value: 0.001 ether}(1);
+        vm.prank(alice); pool.startAuction(1);
+        vm.warp(_ends(1)); pool.settle(1);
+        vm.warp(_ends(1)); pool.expire(1);
+        vm.expectRevert(BackedPool.PivotalMinority.selector);
+        store.buyUnsold(1, 4 ether);
     }
 
     function test_CapAndBalance() public {
-        _fill(); _votes(100 ether);
+        _fill(); _votes(6 ether);
+        _unsoldRound(0);
         vm.expectRevert(BackedStore.OverCap.selector);
-        store.backBatch(0, 6 ether, 6 ether); // cap 5 ether per batch
-        store.setMaxTreasuryBid(50 ether);    // raise: only after 3 days
+        store.buyUnsold(0, 6 ether);                  // cap is 5 ether
+        store.setMaxTreasuryBid(50 ether);
         vm.expectRevert(BackedStore.OverCap.selector);
-        store.backBatch(0, 6 ether, 6 ether);
+        store.buyUnsold(0, 6 ether);                  // raise needs 3 days
         vm.warp(block.timestamp + 3 days);
-        vm.expectRevert(BackedStore.OverCap.selector);
-        store.backBatch(0, 31 ether, 31 ether); // more than the treasury holds
-        store.backBatch(0, 6 ether, 6 ether);
+        store.buyUnsold(0, 6 ether);
     }
 
-    function test_PinnedTotal() public {
-        _fill(); _votes(2 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        vm.expectRevert(BackedStore.PriceMoved.selector);
-        store.backBatch(0, 1 ether, 1 ether); // owner thought it was the first backing
-    }
-
-    function test_OnlyFullAndNotSoleHolder() public {
-        vm.expectRevert(BackedStore.NotFull.selector);
-        store.backBatch(0, 1 ether, 1 ether); // batch 0 is still filling (carol's 40)
-        _fill();
-        _deposit(bob, 80); // batch 1: bob alone
-        vm.expectRevert(BackedStore.NotDepositor.selector);
-        store.backBatch(1, 1 ether, 1 ether);
-    }
-
-    /// The treasury can re-confirm a backing that sits exactly at the price after the Credits changed.
-    function test_TreasuryReconfirmsAtExactPrice() public {
-        uint256[] memory a = _fill(); _votes(1 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        uint256[] memory one = new uint256[](1); one[0] = a[0];
-        vm.prank(alice); pool.withdraw(one);
-        uint256[] memory fresh = _give(bob, 1);
-        uint256 fee = pool.depositFeeFor(1);
-        vm.prank(bob); pool.depositInto{value: fee}(0, fresh, 79);
-        (, uint256 best) = pool.bestBacking(0);
-        assertEq(best, 0);
-        vm.expectRevert(BackedStore.AboveMinimum.selector);
-        store.backBatch(0, 1, 1 ether + 1);  // a top-up would exceed the price…
-        store.reconfirmBatch(0);              // …a re-confirm doesn't
-        pool.startAuction(0, 1 ether);
-        // and it refuses when the price has dropped below the backing
-    }
-
-    function test_TreasuryReconfirmRespectsPrice() public {
-        uint256[] memory a = _fill(); _votes(1 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        uint256[] memory one = new uint256[](1); one[0] = a[0];
-        vm.prank(alice); pool.withdraw(one);
-        uint256[] memory fresh = _give(bob, 1);
-        uint256 fee = pool.depositFeeFor(1);
-        vm.prank(bob); pool.depositInto{value: fee}(0, fresh, 79);
-        _votes(0.5 ether);
-        vm.expectRevert(BackedStore.AboveMinimum.selector);
-        store.reconfirmBatch(0);
-        vm.prank(whale); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, whale));
-        store.reconfirmBatch(0);
-    }
-
-    /// Option-1 audit L: no treasury backing before the depositors have a price.
-    function test_NoTreasuryBackingWithoutPrice() public {
-        _fill();
-        vm.expectRevert(BackedStore.NoMinimum.selector);
-        store.backBatch(0, 1 ether, 1 ether);
-        _votes(0.1 ether);
-        vm.expectRevert(BackedStore.AboveMinimum.selector);
-        store.backBatch(0, 1 ether, 1 ether);
-        store.backBatch(0, 0.1 ether, 0.1 ether);
+    function test_NeverASoleHoldersBatch() public {
+        _deposit(carol, 40);                          // carol holds all 80 of batch 0
+        vm.prank(carol); pool.setReserve(0, 1 ether);
+        vm.prank(whale); pool.back{value: 0.001 ether}(0);
+        vm.prank(carol); pool.startAuction(0);
+        vm.warp(_ends(0)); pool.settle(0);
+        vm.warp(_ends(0)); pool.expire(0);
+        vm.expectRevert(BackedPool.NotDepositor.selector);
+        store.buyUnsold(0, 1 ether);
     }
 
     function test_OnlyOwner() public {
-        _fill();
+        _fill(); _votes(1 ether); _unsoldRound(0);
         vm.prank(whale); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, whale));
-        store.backBatch(0, 1 ether, 1 ether);
-        vm.prank(whale); vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, whale));
-        store.unbackBatch(0);
+        store.buyUnsold(0, 1 ether);
     }
 
-    function test_StaleTreasuryBackingReconfirmedByTopUp() public {
-        uint256[] memory a = _fill(); _votes(2 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        uint256[] memory one = new uint256[](1); one[0] = a[0];
-        vm.prank(alice); pool.withdraw(one);
-        _deposit(bob, 1); // spills? no: open batch is 1; refill batch 0 explicitly
-        uint256[] memory fresh = _give(bob, 1);
-        uint256 fee = pool.depositFeeFor(1);
-        vm.prank(bob); pool.depositInto{value: fee}(0, fresh, 79);
-        (, uint256 best) = pool.bestBacking(0);
-        assertEq(best, 0);                     // stale: can't open an auction
-        store.backBatch(0, 1, 1 ether + 1);    // re-confirm
-        (, best) = pool.bestBacking(0);
-        assertEq(best, 1 ether + 1);
+    function test_UnwoundPurchaseRefundsAndStaysBuyable() public {
+        _fill(); _votes(1 ether); _unsoldRound(0);
+        stmts.setCap(0);                              // the Statements contract refuses
+        store.buyUnsold(0, 1 ether);
+        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Full));
+        assertEq(credits.balanceOf(address(pool)), 80);
+        store.collectRefund();
+        assertEq(store.treasuryBalance(), 30 ether);
+        assertTrue(pool.unsold(0));
+        stmts.setCap(type(uint256).max);
+        store.buyUnsold(0, 1 ether);
+        assertEq(uint8(_state(0)), uint8(BackedPool.BatchState.Sold));
     }
 
     function test_EthOnlyFromPool() public {
@@ -244,16 +177,5 @@ contract BackedStoreTest is Test {
         vm.prank(whale);
         (bool ok,) = address(store).call{value: 1 ether}("");
         assertFalse(ok);
-    }
-
-    /// Every wei of fees that reached the store is either in the treasury, out as a live backing or
-    /// bid, or waiting in the pool for collectRefund.
-    function test_TreasuryConservation() public {
-        _fill(); _votes(1 ether);
-        store.backBatch(0, 1 ether, 1 ether);
-        pool.startAuction(0, 1 ether);
-        vm.prank(bidder); pool.bid{value: 1.05 ether}(0);
-        uint256 out = pool.pendingReturns(address(store));
-        assertEq(store.treasuryBalance() + out, 30 ether);
     }
 }

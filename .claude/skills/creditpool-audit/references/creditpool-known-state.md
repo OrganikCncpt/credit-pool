@@ -174,7 +174,9 @@ audited). Full triage: `docs/BACKED-AUDIT-1.md`. Design: `docs/SELL-FIRST-DESIGN
 | BP-7 | Treasury could back with no price, skipping the "≤ depositors' price" cap, then open above a later price (L) | `backBatch` requires `majorityMinimum != 0` (`NoMinimum`) |
 | BP-8 | Treasury couldn't re-confirm a stale backing sitting exactly at the price (L) | `BackedPool.reconfirm(b)` (no ETH) + owner `BackedStore.reconfirmBatch(b)` with the same price rule |
 
-Accepted (BackedPool): claim rounding dust < 80 wei per batch; treasury price rule checked at backing time
+| BP-9 | Backing redesign (depositor-only start, no backing needed, at-price backing = opening bid, offers below the price during the auction, majority accepts the best offer, doubling rest, store buys unsold) | Rounds R1/R2 in `docs/BACKED-AUDIT-1.md`: decoy+sock dust sale (H, twice), undercut backing (M), lock griefing (M), reset of the doubling (M), endless extension (M), start front-run (L), rest shortened by a failed store buy (L), all fixed with tests |
+
+Accepted (BackedPool): a true 41+ majority can accept a low offer if nobody offers more (anyone can outbid during the 24h auction; offers are binding); claim rounding dust < 80 wei per batch; treasury price rule checked at backing time
 (owner warned in UI if the price drops); a backing posted while Filling is stale at Full until `reconfirm`;
 a pivotal small voter can tip the majority price (same as the minimum-price vote everywhere); finalize gas vs
 the real Statements mint (re-measure, OK-1).

@@ -22,7 +22,12 @@ export const BACKED_ABI = parseAbi([
   "function claimed(uint256, address) view returns (bool)",
   "function depositorOf(uint256) view returns (address)",
   "function batchOf(uint256) view returns (uint256)",
-  "function auctions(uint256) view returns (address highBidder, uint256 highBid, uint256 minimum, uint64 endsAt)",
+  "function auctions(uint256) view returns (address highBidder, uint256 highBid, uint256 minimum, uint64 endsAt, address backer, uint256 backing)",
+  "function acceptTally(uint256, uint64) view returns (uint256)",
+  "function accepted(uint256, uint64, address) view returns (bool)",
+  "function cooldownUntil(uint256) view returns (uint64)",
+  "function unsold(uint256) view returns (bool)",
+  "function votedMedian(uint256) view returns (uint256)",
   "function majorityMinimum(uint256) view returns (uint256)",
   "function bestBacking(uint256) view returns (address who, uint256 amount)",
   "function backings(uint256, address) view returns (uint256 amount, uint64 nonce)",
@@ -38,7 +43,9 @@ export const BACKED_ABI = parseAbi([
   "function back(uint256 batchId) payable",
   "function withdrawBacking(uint256 batchId)",
   "function reconfirm(uint256 batchId)",
-  "function startAuction(uint256 batchId, uint256 minOpening)",
+  "function startAuction(uint256 batchId)",
+  "function acceptBacking(uint256 batchId, uint64 round, address backer, uint256 amount)",
+  "function expire(uint256 batchId)",
   "function bid(uint256 batchId) payable",
   "function settle(uint256 batchId)",
   "function redeem(uint256 batchId)",
@@ -53,7 +60,8 @@ export const BACKED_ABI = parseAbi([
   "error BidTooLow()", "error AuctionLive()", "error NothingToClaim()", "error TransferFailed()",
   "error UnexpectedToken()", "error StatementNotReceived()", "error CreditsNotBurned()", "error BatchMoved()",
   "error ZeroAddress()", "error NotBacked()", "error BackingTooLow()", "error BackingChanged()",
-  "error NoMinimum()", "error BelowMinimum()", "error NotYet()", "error NeedMoreGas()", "error TooMany()",
+  "error NoMinimum()", "error Cooldown()", "error BidInstead()", "error OfferChanged()", "error NotUnsold()", "error PriceMoved()",
+  "error PivotalMinority()", "error NotYet()", "error NeedMoreGas()", "error TooMany()",
 ]);
 
 // Contract enum → the names the rest of the site uses ("Settled" = sold and delivered).
@@ -62,18 +70,16 @@ export const TREASURY_ABI = parseAbi([
   "function owner() view returns (address)",
   "function treasuryBalance() view returns (uint256)",
   "function maxTreasuryBid() view returns (uint256)",
-  "function backBatch(uint256 batchId, uint256 amount, uint256 expectedTotal)",
-  "function unbackBatch(uint256 batchId)",
-  "function reconfirmBatch(uint256 batchId)",
+  "function buyUnsold(uint256 batchId, uint256 expectedPrice)",
   "function collectRefund()",
-  "error NotFull()", "error NotDepositor()", "error AboveMinimum()", "error NoMinimum()", "error OverCap()", "error PriceMoved()",
+  "error PriceMoved()", "error OverCap()",
 ]);
 
 const STATEMENT_OWNER_ABI = parseAbi(["function ownerOf(uint256) view returns (address)"]);
 // A bid prefill people can read: the minimum rounded UP to 4 significant digits (never below it).
 const roundUp = (wei) => { const len = wei.toString().length; if (len <= 4) return wei; const u = 10n ** BigInt(len - 4); return ((wei + u - 1n) / u) * u; };
 
-export const BACKED_STATES = ["Filling", "Full", "Auction", "Settled"];
+export const BACKED_STATES = ["Filling", "Full", "Auction", "Decide", "Settled"];
 const LABEL = { Filling: "Filling", Auction: "Auction", Settled: "Sold" };
 // A full batch's tag says what it's waiting for: a price, a backer at that price, or someone to press Start.
 export const stateLabel = (s, minimum, bestAmt) => s !== "Full" ? LABEL[s] ?? s
@@ -84,6 +90,7 @@ export const BACKED_FILTERS = [
   ["filling", "Filling", (s) => s === "Filling"],
   ["ready", "Pricing & backing", (s) => s === "Full"],
   ["auction", "Live auctions", (s) => s === "Auction"],
+  ["decide", "Holders deciding", (s) => s === "Decide"],
   ["sold", "Sold", (s) => s === "Settled"],
 ];
 
@@ -92,18 +99,19 @@ export const BACKED_FILTERS = [
 export const FINALIZE_TX_GAS = 14_000_000n;
 
 export const BACKED_TIPS = {
-  back: "Offer ETH for this whole batch. Only a backing at or above the depositors' price can open the auction, as its opening bid. " +
-    "If nobody outbids it, you get the Statement. Until the auction starts you can top up or take it back any time.",
+  back: "Offer ETH for the whole batch, any amount. At or above the price when the auction starts, the best backing opens it as the first bid. " +
+    "During the auction, offers stay below the price; if nobody bids, the best offer is what the holders vote on.",
   reconfirm: "Confirms your backing for the batch's current Credits, without adding ETH. Needed after the Credits change (including a backing posted while it filled).",
-  unback: "Takes your backing back to Ready to collect. Only possible while it isn't the opening bid of a running auction.",
-  vote: "The lowest price you'd accept for the whole batch. The depositors' price is the lowest price that more than 40 of the 80 slots accept. " +
-    "No auction can start without it, and it only opens with a backing at or above it, so every auction sells at that price or more. Enter 0 to clear your vote.",
-  startBacked: "Starts a 24-hour auction with the best backing as the opening bid (it meets the depositors' price). Nothing burns until it sells. Anyone can press it.",
-  bid: "Your ETH is held by the pool. If you're outbid, you get it back (Ready to collect). Each bid must beat the last by 5%. Bids in the final 15 minutes add 15 minutes.",
-  settleBacked: "Ends the auction and sells to the highest bidder: the 80 Credits burn into a Statement for them and depositors are paid. Anyone can press it.",
-  withdrawBacked: "Take your Credits back to your wallet. Possible while the batch fills, and while it's full as long as no auction is running (the batch reopens).",
+  unback: "Takes your backing back to collect. Not while an auction runs (offers are binding until it's settled), and not once it's the opening bid or the offer being voted on.",
+  vote: "The lowest price you'd accept for the whole batch. The depositors' price is the lowest price more than 40 of the 80 slots accept: the auction's reserve. Enter 0 to clear your vote.",
+  startBacked: "Depositors only, once there's a price; no backing needed. A backing at or above the price opens it as the first bid. Nothing burns until it sells.",
+  bid: "Your ETH is held by the pool. The first bid must meet the depositors' price; after that +5% each. Outbid ETH comes back to collect. Bids in the final 15 minutes add 15 minutes.",
+  settleBacked: "Ends the auction. A bid at the price buys it; with no bid, the backer buys it if their offer meets the price, otherwise holders get 24 hours to decide. Anyone can press it.",
+  accept: "Accept the backer's exact offer. When more than 40 of the 80 slots accept, it sells to the backer in the same transaction and the sale is split by slots.",
+  expire: "The holders' window closed without a majority: the backer is refunded, nothing burns, and the batch rests 24 hours (holders can leave; the store may buy it at the price).",
+  withdrawBacked: "Take your Credits back to your wallet. Possible while the batch fills, and while it's full as long as no auction or holders' decision is running.",
   redeemBacked: "You hold all 80 slots: burn them into a Statement straight to your wallet. No auction, no fee.",
-  treasuryBack: "Owner only. Backs this batch from the store treasury, up to the per-batch cap and never above the depositors' price. Raising the cap takes 3 days.",
+  treasuryBuy: "Owner only. Buys this unsold batch for the store at exactly the depositors' price, which must also be the median of their votes. Capped per purchase; raising the cap takes 3 days.",
   deposit: "Moves the selected Credits into the open batch. Fee: {rule}, paid in ETH. You can withdraw until an auction starts; " +
     "they burn only if the batch sells, and then each earns 2 SCREDIT.",
   claim: "Sends your share of the sale to your wallet: your slots ÷ 80 of the price. Sales carry no fee.",
@@ -116,35 +124,38 @@ export function applyBackedCopy(el) {
     ...[
       ["Deposit", "Add Credits to the open batch. Withdraw any time before an auction starts."],
       ["Vote", "Depositors set the batch's price: the lowest price more than 40 of the 80 slots accept."],
-      ["Back", "Anyone offers ETH for the whole batch. Only a backing at or above the price can open the auction."],
-      ["Auction", "24 hours, open to anyone, starting at the backing. It always sells at the price or more."],
-      ["Collect", "Only a sale burns the 80 Credits. Your share = your Credits ÷ 80, plus 2 SCREDIT each."],
+      ["Auction", "A depositor starts it: 24 hours, reserve = the price. A bid at the price sells it."],
+      ["Back", "Anyone offers ETH for the batch, any amount, before or during the auction."],
+      ["Decide", "No bid? Holders vote on the best offer (41 of 80), or it's refunded and nothing burns."],
     ].map(([b, s]) => el("li", {}, el("b", {}, b), el("span", {}, s))),
   );
   const lead = document.querySelector(".intro p");
-  if (lead) lead.textContent = "Pool your Credits with other holders. Nothing burns until a buyer is locked in: depositors set the price, " +
-    "a backer commits ETH at that price or more, and a 24-hour auction lets anyone bid higher. The 80 Credits burn into a Statement only when it sells, and the sale is split by how many Credits each person put in.";
+  if (lead) lead.textContent = "Pool your Credits with other holders. Nothing burns until a buyer is locked in: depositors set the price and start a 24-hour auction at it, " +
+    "while backers can make offers for the whole batch. If nobody bids, the holders decide whether to take the best offer. The 80 Credits burn into a Statement only when it sells, and the sale is split by how many Credits each person put in.";
   for (const d of document.querySelectorAll("[data-mode='burn-first']")) d.remove();
   const gb = document.getElementById("gallery-blurb");
   if (gb) gb.textContent = "Every Statement the pool has sold. Each was burned from 80 Credits the moment its sale locked in; click one to see them.";
   const safe = [...document.querySelectorAll(".safety li")].find((li) => li.textContent.startsWith("During assembly"));
   if (safe) safe.textContent = "Nothing burns until a sale is locked in. The burn, the delivery to the buyer and the payout happen in one all-or-nothing step: if any part fails, it's all undone and the buyer is refunded. Jack's Statements contract can only reach the 80 Credits being sold.";
   const sb = document.getElementById("store-blurb");
-  if (sb) sb.textContent = "Statements the store treasury won by backing batches, auctioned for SCREDIT only (never ETH). The treasury (75% of deposit fees) backs full batches, " +
-    "capped per batch and never above the depositors' price; outbid, it gets its ETH back. Every SCREDIT bid also pays a small platform fee in ETH.";
+  if (sb) sb.textContent = "Statements the store treasury bought, auctioned for SCREDIT only (never ETH). The treasury (75% of deposit fees) only buys batches whose round ended unsold, " +
+    "at exactly the depositors' price, capped per purchase. Every SCREDIT bid also pays a small platform fee in ETH.";
   const faq = document.getElementById("faq");
   const q = (sum, text) => el("details", {}, el("summary", {}, sum), el("p", {}, text));
   faq?.querySelector("h2")?.after(
     q("How is the price set?", "Depositors vote the lowest price they'd accept. The batch's price is the lowest price that more than 40 of the 80 slots accept, " +
-      "so a small group can't sell it cheap. No auction can start until that price exists."),
-    q("What is backing?", "A backer offers ETH for a whole full batch. Several people can back the same batch. Only a backing at or above the depositors' price " +
-      "can open the auction, and the best one becomes the opening bid. If nobody outbids it, the backer gets the Statement. Until the auction starts, a backing can be topped up or taken back any time."),
-    q("What if someone backs too low?", "Nothing happens. A backing below the depositors' price can't start an auction, so it can't lock anyone's Credits or buy the batch. " +
-      "If the depositors decide that offer is fair after all, the majority lowers its vote to it, and then it can open."),
-    q("When do my Credits burn?", "Only when a sale is locked in, at the end of an auction that opened at or above the depositors' price. " +
-      "The burn, delivery and payout happen in one transaction; if any part fails, everything is undone and the bidder is refunded."),
-    q("Can I get my Credits back?", "Yes: any time while the batch fills, and while it's full as long as no auction is running. Taking Credits out of a full batch reopens it, " +
-      "and backings made for the old set of Credits no longer count until their backer re-confirms them (one free click). Votes stay; a depositor who leaves entirely loses theirs. The deposit fee isn't refunded."),
+      "so a small group can't sell it cheap. It's the auction's reserve: the first bid must meet it."),
+    q("What is backing?", "An offer for the whole batch, any amount, from anyone (often a whale), before or during the auction. Several people can back. " +
+      "A backing at or above the price when the auction starts is its opening bid, so every bid must beat it. During the auction, offers stay below the price. " +
+      "A backing can be taken back before an auction starts, or after it's settled; while an auction runs, offers are binding."),
+    q("What happens if nobody bids?", "The holders get 24 hours to vote on the best offer: when more than 40 of the 80 slots accept, it sells to that backer. " +
+      "Otherwise (or with no offer at all) the backer is refunded, nothing burns, and the batch rests: 24 hours, doubling each round in a row that doesn't sell. " +
+      "Holders can take their Credits back during the rest, and the store treasury may buy it at exactly the depositors' price."),
+    q("Can a backer or a low offer lock my Credits?", "No. Only depositors can start an auction, and only once the majority has set a price. Backers can't start anything, and anyone can beat a low offer with a better one."),
+    q("When do my Credits burn?", "Only when a sale is locked in: a winning bid, an offer the majority accepted, or the store buying at the price. " +
+      "The burn, delivery and payout happen in one transaction; if any part fails, everything is undone and the buyer is refunded."),
+    q("Can I get my Credits back?", "Yes: any time while the batch fills, and while it's full as long as no auction or holders' decision is running. The 24-hour rest after an unsold round is a window to leave. " +
+      "Taking Credits out of a full batch reopens it, and backings for the old set of Credits must be re-confirmed (free). The deposit fee isn't refunded."),
   );
 }
 
@@ -155,17 +166,18 @@ export function applyBackedCopy(el) {
 async function load(ctx, b) {
   const { S, read, now } = ctx;
   const me = S.account;
-  const [info, auction, best, minimum, backers, slots, pref, claimed, myBacking, opensAt] = await Promise.all([
+  const [info, auction, best, minimum, backers, slots, pref, claimed, myBacking, opensAt, cooldown, unsold] = await Promise.all([
     read("batchInfo", [b]), read("auctions", [b]), read("bestBacking", [b]), read("majorityMinimum", [b]),
     read("backersOf", [b]),
     me ? read("slots", [b, me]) : 0n, me ? read("reservePref", [b, me]) : 0n, me ? read("claimed", [b, me]) : false,
-    me ? read("backings", [b, me]) : [0n, 0n], read("assemblyOpensAt"),
+    me ? read("backings", [b, me]) : [0n, 0n], read("assemblyOpensAt"), read("cooldownUntil", [b]), read("unsold", [b]),
   ]);
-  const [st, filled, depositors, statementId, proceeds, , nonce] = info;
+  const [st, filled, depositors, statementId, proceeds, round, nonce] = info;
   const state = BACKED_STATES[st];
-  const [highBidder, highBid, auctionMin, endsAt] = auction;
+  const [highBidder, highBid, auctionMin, endsAt, backer, backing] = auction;
   const [bestWho, bestAmt] = best;
   const [myBack, myBackNonce] = myBacking;
+  const meL = me?.toLowerCase();
   let voted = 0n;
   if (state === "Filling" || state === "Full") {
     const addrs = await read("batchDepositors", [b]);
@@ -174,49 +186,64 @@ async function load(ctx, b) {
     ]);
     voted = counts.reduce((t, n, i) => (prefs[i] ? t + n : t), 0n);
   }
-  // Whoever ends up holding the Statement (winning bidder or backer) keeps seeing the batch.
+  const [tally, iAccepted] = state === "Decide" ? await Promise.all([read("acceptTally", [b, round]), me ? read("accepted", [b, round, me]) : false]) : [0n, false];
   const owner = state === "Settled" && me ? await read("ownerOf", [statementId], S.statements, STATEMENT_OWNER_ABI).catch(() => null) : null;
   const m = {
-    iWon: !!owner && owner.toLowerCase() === me.toLowerCase(),
-    b, info, state, filled, depositors, statementId, proceeds, nonce, highBidder, highBid, auctionMin, endsAt,
-    bestWho, bestAmt, minimum, backers, slots, pref, claimed, myBack, opensAt, voted,
+    b, info, state, filled, depositors, statementId, proceeds, round, nonce, highBidder, highBid, auctionMin, endsAt, backer, backing,
+    bestWho, bestAmt, minimum, backers, slots, pref, claimed, myBack, opensAt, voted, cooldown, unsold, tally, iAccepted,
     myStale: myBack > 0n && myBackNonce !== nonce,
-    iLead: !!me && highBidder.toLowerCase() === me.toLowerCase(),
-    iBestBacker: !!me && bestAmt > 0n && bestWho.toLowerCase() === me.toLowerCase(),
+    iLead: !!me && highBidder.toLowerCase() === meL,
+    iBacker: !!me && backing > 0n && backer.toLowerCase() === meL,
+    iWon: !!owner && owner.toLowerCase() === meL,
+    hasBid: highBidder !== "0x0000000000000000000000000000000000000000",
     canAct: !!me && !S.viewOnly,
   };
-  m.ready = state === "Full" && minimum > 0n && bestAmt >= minimum;
-  m.live = state === "Auction" && now() < endsAt;
+  m.cooling = state === "Full" && now() < cooldown;
+  m.ready = state === "Full" && minimum > 0n && !m.cooling && now() >= opensAt; // no backing needed
+  m.opensWithBacking = m.ready && bestAmt >= minimum;                             // it would be the opening bid
+  m.live = (state === "Auction" || state === "Decide") && now() < endsAt;
   m.ended = state === "Auction" && !m.live;
+  m.windowOver = state === "Decide" && !m.live;
   m.share = proceeds && slots ? (proceeds * slots) / 80n : 0n;
-  // Where it is on the five-step rail: Fill → Price → Backer → Auction → Sold.
-  m.step = state === "Filling" ? 0 : state === "Full" ? (!minimum ? 1 : !m.ready ? 2 : 3) : state === "Auction" ? 3 : 5;
-  m.sig = JSON.stringify([info, auction, best, minimum, backers, slots, pref, claimed, myBacking, voted, m.live, now() >= opensAt, me, S.viewOnly, m.iWon],
-    (_, v) => (typeof v === "bigint" ? v.toString() : v));
+  // Fill → Price → Auction (incl. the holders' decision) → Sold.
+  m.step = state === "Filling" ? 0 : state === "Full" ? (!minimum ? 1 : 2) : state === "Settled" ? 4 : 2;
+  m.sig = JSON.stringify([info, auction, best, minimum, backers, slots, pref, claimed, myBacking, voted, m.live, now() >= opensAt, m.cooling,
+    unsold, tally, iAccepted, me, S.viewOnly, m.iWon], (_, v) => (typeof v === "bigint" ? v.toString() : v));
   return m;
 }
 
-const STEPS = ["Fill", "Price", "Backer", "Auction", "Sold"];
+const STEPS = ["Fill", "Price", "Auction", "Sold"];
 function rail(el, m) {
-  return el("ol", { class: "brail", "aria-label": `Step ${Math.min(m.step + 1, 5)} of 5` }, ...STEPS.map((label, i) =>
-    el("li", { class: i < m.step ? "done" : i === m.step ? "now" : "" }, el("i", {}), el("span", {}, label))));
+  return el("ol", { class: "brail", "aria-label": `Step ${Math.min(m.step + 1, 4)} of 4` }, ...STEPS.map((label, i) =>
+    el("li", { class: i < m.step ? "done" : i === m.step ? "now" : "" }, el("i", {}), el("span", {}, i === 2 && m.state === "Decide" ? "Decide" : label))));
 }
+const nameOf = (ctx, a) => (ctx.S.store && a.toLowerCase() === ctx.S.store.toLowerCase() ? "the store treasury" : ctx.short(a));
+const tagText = (m) => m.state === "Full" ? (!m.minimum ? "Needs a price" : m.cooling ? "Resting" : "Ready")
+  : m.state === "Auction" ? (m.live ? "Live" : "Ended") : m.state === "Decide" ? (m.live ? "Holders decide" : "Window closed")
+  : m.state === "Settled" ? "Sold" : "Filling";
 
 // One short sentence: where the batch is and what it's waiting for.
 function status(ctx, m) {
   const { el, eth, dur, now } = ctx;
   const who = (a) => (ctx.S.account && a.toLowerCase() === ctx.S.account.toLowerCase() ? "you" : nameOf(ctx, a));
+  const ends = (pre, post = "") => el("span", {}, pre, el("span", { "data-ends": String(m.endsAt) }, dur(m.endsAt - now())), post);
   switch (m.state) {
     case "Filling": return `${m.filled}/80 Credits · ${80n - m.filled} to go`;
     case "Full":
       if (!m.minimum) return `Needs a price · ${m.voted}/80 slots voted, 41 needed`;
-      if (!m.ready) return `Price ${eth(m.minimum)} · needs a backer at that price${m.bestAmt ? ` (best so far ${eth(m.bestAmt)})` : ""}`;
-      return now() < m.opensAt ? `Backed at ${eth(m.bestAmt)} · auctions open in ${dur(m.opensAt - now())}`
-        : `Backed at ${eth(m.bestAmt)} by ${who(m.bestWho)} · ready to start`;
+      if (m.cooling) return el("span", {}, `Unsold last round · resting, restart in `, el("span", { "data-ends": String(m.cooldown) }, dur(m.cooldown - now())));
+      if (now() < m.opensAt) return `Price ${eth(m.minimum)} · auctions open in ${dur(m.opensAt - now())}`;
+      return `Price ${eth(m.minimum)} · ${m.bestAmt >= m.minimum ? `${who(m.bestWho)}'s ${eth(m.bestAmt)} would open it`
+        : m.bestAmt ? `best offer ${eth(m.bestAmt)}` : "no offers yet"} · a depositor can start`;
     case "Auction":
-      return m.live
-        ? el("span", {}, `Live · ${m.iLead ? "you lead" : "high bid"} ${eth(m.highBid)} · ends in `, el("span", { "data-ends": String(m.endsAt) }, dur(m.endsAt - now())))
-        : `Ended at ${eth(m.highBid)} · ready to settle`;
+      if (!m.live) return m.hasBid ? `Ended at ${eth(m.highBid)} · ready to settle`
+        : m.bestAmt ? `No bid at ${eth(m.auctionMin)} · settle to let holders decide on the best offer, ${eth(m.bestAmt)}`
+        : "No bid and no offer · settle to end it unsold";
+      return m.hasBid ? ends(`Live · ${m.iLead ? "you lead" : "high bid"} ${eth(m.highBid)} · ends in `)
+        : ends(`Live · reserve ${eth(m.auctionMin)}, no bid yet${m.bestAmt ? ` · best offer ${eth(m.bestAmt)}` : ""} · ends in `);
+    case "Decide":
+      return m.live ? ends(`No bid · take ${who(m.backer)}'s ${eth(m.backing)}? ${m.tally}/80 accepted, 41 sells · `, " left")
+        : "The holders' window closed without a majority · close it to refund the backer";
     case "Settled":
       if (!m.proceeds) return "Burned into a Statement for its sole holder";
       if (m.iWon && !m.slots) return `You won it for ${eth(m.proceeds)} · Statement #${m.statementId} is in your wallet`;
@@ -224,9 +251,6 @@ function status(ctx, m) {
     default: return "";
   }
 }
-const nameOf = (ctx, a) => (ctx.S.store && a.toLowerCase() === ctx.S.store.toLowerCase() ? "the store treasury" : ctx.short(a));
-const tagText = (m) => m.state === "Full" ? (!m.minimum ? "Needs a price" : m.ready ? "Ready" : "Needs a backer")
-  : m.state === "Auction" ? (m.live ? "Live" : "Ended") : m.state === "Settled" ? "Sold" : "Filling";
 
 // ───────────────────────── actions ─────────────────────────
 function actions(ctx, m) {
@@ -242,12 +266,13 @@ function actions(ctx, m) {
       const total = m.myBack + v;
       if (total < 80n) return toast("A backing must be at least 80 wei", true);
       const ok = await confirmStep(`Back batch #${b} with ${eth(total, 6)}?`, [
-        `${m.myBack ? `Adds ${eth(v, 6)} to your ${eth(m.myBack, 6)}. ` : ""}Your ETH is held by the pool as an offer for all 80 Credits.`,
-        !m.minimum ? "The depositors haven't set a price yet: your backing waits, and counts once they set one at or below it."
-          : total < m.minimum ? `That's below the depositors' price of ${eth(m.minimum, 6)}, so it can't open the auction unless they lower it.`
-          : total > m.bestAmt ? "It meets the depositors' price and would be the opening bid." : `It meets the price; the best backing is ${eth(m.bestAmt, 6)}.`,
-        "If it opens the auction and nobody outbids it, you get the Statement.",
-        "Until the auction starts you can take it back any time.",
+        `${m.myBack ? `Adds ${eth(v, 6)} to your ${eth(m.myBack, 6)}. ` : ""}Your ETH is held by the pool as a standing offer for all 80 Credits.`,
+        m.state === "Auction" ? "During the auction an offer must stay below the depositors' price (at the price, bid instead). If nobody bids, the best offer is what the holders vote on."
+          : m.minimum && total >= m.minimum ? `It meets the depositors' price (${eth(m.minimum, 6)}): if it's the best when the auction starts, it's the opening bid, and every bid must beat it.`
+          : "If nobody bids at the depositors' price, the best offer when the auction ends is what the holders vote on.",
+        total > m.bestAmt ? "It would be the best offer right now." : `The best offer is ${eth(m.bestAmt, 6)}.`,
+        m.state === "Auction" ? "Offers are binding while the auction runs: you can take it back after it's settled, unless it's the offer the holders vote on."
+          : "You can take it back any time before an auction starts. Once one runs, offers are binding until it's settled.",
       ], "Back");
       if (ok) send(`Back #${b}`, "back", [b], v);
     },
@@ -255,11 +280,13 @@ function actions(ctx, m) {
     unback: () => send(`Take back #${b}`, "withdrawBacking", [b]),
     start: async () => {
       const ok = await confirmStep(`Start the auction for batch #${b}?`, [
-        `Opening bid ${eth(m.bestAmt, 6)} (${nameOf(ctx, m.bestWho)}), at or above the depositors' price of ${eth(m.minimum, 6)}.`,
-        "Runs 24 hours; anyone can bid higher (+5%), and bids in the last 15 minutes add 15 minutes.",
-        "It sells to the highest bidder when it ends; only then do the 80 Credits burn. Depositors can't withdraw while it runs.",
+        `Reserve: ${eth(m.minimum, 6)}, the depositors' price.`,
+        m.bestAmt >= m.minimum ? `${nameOf(ctx, m.bestWho)}'s ${eth(m.bestAmt, 6)} opens it as the first bid; every bid must beat it by 5%.`
+          : "The first bid must meet the reserve. Backers can keep making offers below it during the auction.",
+        "With no bid: the holders vote on the best offer for 24 hours, or with no offer it ends unsold and rests.",
+        "Runs 24 hours. Nothing burns until it sells. Depositors can't withdraw while it runs.",
       ], "Start auction");
-      if (ok) send(`Start auction #${b}`, "startAuction", [b, m.bestAmt]);
+      if (ok) send(`Start auction #${b}`, "startAuction", [b]);
     },
     bid: async (v, min) => {
       if (v == null) return toast("Enter a bid in ETH", true);
@@ -273,6 +300,16 @@ function actions(ctx, m) {
       if (ok) send(`Bid on #${b}`, "bid", [b], v);
     },
     settle: () => send(`Settle #${b}`, "settle", [b], undefined, undefined, undefined, FINALIZE_TX_GAS),
+    accept: async () => {
+      const after = m.tally + m.slots;
+      const ok = await confirmStep(`Take ${eth(m.backing, 6)} for batch #${b}?`, [
+        `You accept exactly this offer from ${nameOf(ctx, m.backer)}; if it changed, your acceptance is refused.`,
+        `Your ${m.slots} slot${m.slots > 1n ? "s" : ""} count toward the 41 needed. ${after >= 41n ? "This makes the majority: it sells in this transaction." : `After you, ${41n - after} more needed.`}`,
+        `If it sells, your share is ${eth((m.backing * m.slots) / 80n, 6)}. You can't take an acceptance back.`,
+      ], "Accept");
+      if (ok) send(`Accept #${b}`, "acceptBacking", [b, m.round, m.backer, m.backing], undefined, undefined, undefined, FINALIZE_TX_GAS);
+    },
+    expire: () => send(`Close #${b}`, "expire", [b]),
     claim: () => send(`Claim #${b}`, "claim", [b]),
     withdraw: async () => {
       const all = await ctx.readFresh("batchCredits", [b]);
@@ -297,10 +334,10 @@ function actions(ctx, m) {
 
 // The one thing that moves this batch forward for the person looking at it (or null).
 async function primary(ctx, m) {
-  const { el, eth, now } = ctx;
-  const input = (ph, v = "") => el("input", { type: "number", step: "any", min: "0", placeholder: ph, value: v });
+  const { el, eth } = ctx;
   if (!m.canAct) return null;
   const a = actions(ctx, m);
+  const input = (ph, v = "") => el("input", { type: "number", step: "any", min: "0", placeholder: ph, value: v });
   const button = (label, fn, tip) => el("button", { class: "primary-btn", "data-tip": tip, onclick: fn }, label);
   const inline = (ph, val, label, fn, tip) => {
     const i = input(ph, val);
@@ -309,17 +346,17 @@ async function primary(ctx, m) {
   switch (m.state) {
     case "Full":
       if (!m.minimum) return m.slots && !m.pref ? inline("Your price (ETH)", "", "Vote", a.vote, "vote") : null;
-      if (!m.ready) {
-        if (m.myStale) return button(`Re-confirm my ${eth(m.myBack)}`, a.reconfirm, "reconfirm");
-        const need = m.minimum - m.myBack;
-        return button(m.myBack ? `Top up to ${eth(m.minimum)}` : `Back at ${eth(m.minimum)}`, () => a.back(need), "back");
-      }
-      return now() >= m.opensAt ? button("Start auction", a.start, "startBacked") : null;
+      if (m.myStale) return button(`Re-confirm my ${eth(m.myBack)}`, a.reconfirm, "reconfirm");
+      if (m.ready && m.slots) return button("Start auction", a.start, "startBacked");
+      return m.slots ? null : inline("Offer (ETH)", "", "Back", a.back, "back");
     case "Auction":
-      if (m.ended) return button(`Settle · sell for ${eth(m.highBid)}`, a.settle, "settleBacked");
+      if (m.ended) return button("Settle", a.settle, "settleBacked");
       if (m.iLead) return null;
       { const min = await ctx.readFresh("minNextBid", [m.b]);
         return inline("Bid (ETH)", formatEther(roundUp(min)), "Bid", (v) => a.bid(v, min), "bid"); }
+    case "Decide":
+      if (m.windowOver) return button("Close: refund the backer", a.expire, "expire");
+      return m.slots && !m.iAccepted ? button(`Accept ${eth(m.backing)}`, a.accept, "accept") : null;
     case "Settled":
       return m.slots && m.proceeds && !m.claimed ? button(`Claim ${eth(m.share)}`, a.claim, "claim") : null;
     default: return null;
@@ -330,14 +367,16 @@ async function primary(ctx, m) {
 export async function backedCard(ctx, b, mineOnly) {
   const { S, el } = ctx;
   const m = await load(ctx, b);
-  if (mineOnly && !m.slots && !m.myBack && !m.iLead && !m.iWon) return null;
+  if (mineOnly && !m.slots && !m.myBack && !m.iLead && !m.iBacker && !m.iWon) return null;
   const key = `${mineOnly ? "mine" : "all"}:${b}`;
   const cached = S.cards.get(key);
   if (cached && cached.sig === m.sig) return cached.el;
   const meta = [`${m.filled}/80`, `${m.depositors} depositor${m.depositors === 1n ? "" : "s"}`];
   if (m.slots) meta.push(`you: ${m.slots}`);
   if (m.myBack) meta.push(`your backing ${ctx.eth(m.myBack)}`);
-  const card = el("article", { class: `bcard s-${m.state.toLowerCase()}${m.state === "Full" && !m.ready ? " waiting" : ""}`, tabindex: "0", "aria-label": `Batch #${b}, ${tagText(m)}` },
+  if (m.iBacker) meta.push(`your offer ${ctx.eth(m.backing)}`);
+  const waiting = (m.state === "Full" && !m.ready) || m.state === "Decide";
+  const card = el("article", { class: `bcard s-${m.state.toLowerCase()}${waiting ? " waiting" : ""}`, tabindex: "0", "aria-label": `Batch #${b}, ${tagText(m)}` },
     el("header", {}, el("b", {}, `Batch #${b}`), el("span", { class: "btag" }, tagText(m))),
     rail(el, m),
     el("p", { class: "bstatus" }, status(ctx, m)),
@@ -372,48 +411,54 @@ async function renderDrawer(ctx) {
   const sec = (title, ...kids) => el("section", { class: "dsec" }, el("h3", {}, title), ...kids);
   const row = (k, v) => el("div", { class: "drow" }, el("span", {}, k), el("b", {}, v));
   const ghost = (label, fn, tip) => el("button", { class: "ghost", "data-tip": tip, onclick: fn }, label);
+  const who = (x) => (S.account && x.toLowerCase() === S.account.toLowerCase() ? "you" : nameOf(ctx, x));
   const parts = [];
 
-  // Price
-  if (m.state === "Filling" || m.state === "Full") {
-    const p = [row("Depositors' price", m.minimum ? ethUsd(m.minimum) : "not set"), row("Voted", `${m.voted} of 80 slots · ${m.voted >= 41n ? "majority" : "41 needed"}`)];
+  if (m.state === "Filling" || m.state === "Full" || m.state === "Auction") {
+    const p = [row("Depositors' price", m.minimum ? ethUsd(m.minimum) : "not set"),
+      row("Voted", `${m.voted} of 80 slots · ${m.voted >= 41n ? "majority" : "41 needed"}`)];
     if (m.slots) {
       p.push(row("Your vote", m.pref ? ethUsd(m.pref) : "not voted"));
-      if (m.canAct && m.pref) { const i = input("Your price (ETH)", formatEther(m.pref)); // first vote lives in the header
-        p.push(el("div", { class: "inline" }, i, ghost(m.pref ? "Change vote" : "Vote", () => a.vote(a.toWei(i.value)), "vote"))); }
+      if (m.canAct && m.pref) { const i = input("Your price (ETH)", formatEther(m.pref)); // the first vote lives in the header
+        p.push(el("div", { class: "inline" }, i, ghost("Change vote", () => a.vote(a.toWei(i.value)), "vote"))); }
     }
-    p.push(el("p", { class: "hint" }, "The price is the lowest price more than 40 of the 80 slots accept. No auction starts without it, and only a backing at or above it can open one."));
-    parts.push(sec("Price", ...p));
+    p.push(el("p", { class: "hint" }, "The price is the lowest price more than 40 of the 80 slots accept. It's the auction's reserve: the first bid must meet it."));
+    if (m.state !== "Auction") parts.push(sec("Price", ...p));
 
-    // Backing
     const list = m.backers[0].map((w, i) => ({ who: w, amt: m.backers[1][i], ok: m.backers[2][i] })).sort((x, y) => (y.amt > x.amt ? 1 : -1));
-    const bk = [row("Best backing", m.bestAmt ? `${ethUsd(m.bestAmt)} · ${nameOf(ctx, m.bestWho)}` : "none")];
-    if (list.length) bk.push(el("ol", { class: "backers" }, ...list.map((x) => el("li", { class: x.ok && (!m.minimum || x.amt >= m.minimum) ? "" : "stale" },
-      el("span", {}, S.account && x.who.toLowerCase() === S.account.toLowerCase() ? "you" : nameOf(ctx, x.who)),
-      el("span", {}, eth(x.amt), !x.ok ? " · needs re-confirming" : m.minimum && x.amt < m.minimum ? " · below price" : "")))));
+    const bk = [row(m.state === "Auction" ? "Best offer below the price" : "Best backing", m.bestAmt ? `${ethUsd(m.bestAmt)} · ${who(m.bestWho)}` : "none")];
+    if (list.length) bk.push(el("ol", { class: "backers" }, ...list.map((x) => el("li", { class: x.ok ? "" : "stale" },
+      el("span", {}, who(x.who)), el("span", {}, eth(x.amt), x.ok ? "" : " · needs re-confirming")))));
     if (m.canAct) {
-      // Prefill only what would make it count: up to the price, unless it's already backed at the price.
-      const target = m.minimum && !m.ready && m.minimum > m.myBack ? m.minimum - m.myBack : 0n;
-      const i = input(m.myBack ? "Add (ETH)" : "Amount (ETH)", target ? formatEther(target) : "");
+      const i = input(m.myBack ? "Add (ETH)" : "Amount (ETH)");
       bk.push(el("div", { class: "inline" }, i, ghost(m.myBack ? "Add" : "Back", () => a.back(a.toWei(i.value)), "back")));
       if (m.myStale) bk.push(ghost(`Re-confirm my ${eth(m.myBack)} (free)`, a.reconfirm, "reconfirm"));
-      if (m.myBack) bk.push(ghost(`Take back my ${eth(m.myBack)}`, a.unback, "unback"));
+      if (m.myBack && m.state !== "Auction") bk.push(ghost(`Take back my ${eth(m.myBack)}`, a.unback, "unback"));
+      if (m.myBack && m.state === "Auction") bk.push(el("p", { class: "hint" }, `Your ${eth(m.myBack)} offer is binding until the auction is settled.`));
     }
-    parts.push(sec("Backing", ...bk));
+    bk.push(el("p", { class: "hint" }, "A backing is a standing offer for the whole batch, any amount. At or above the price when the auction starts, the best one is the opening bid. " +
+      "During the auction, offers stay below the price; if nobody bids, the best offer is what the holders vote on."));
+    parts.push(sec(m.state === "Auction" ? "Offers below the price" : "Backing", ...bk));
   }
 
-  // Auction
-  if (m.state === "Auction" || (m.state === "Settled" && m.proceeds)) {
-    const au = m.state === "Auction"
-      ? [row("Depositors' price", ethUsd(m.auctionMin)), row("High bid", `${ethUsd(m.highBid)} · ${m.iLead ? "you" : nameOf(ctx, m.highBidder)}`),
-         row("Ends", el("span", { "data-ends": String(m.endsAt) }, ctx.dur(m.endsAt - ctx.now())))]
-      : [row("Sold for", ethUsd(m.proceeds)), row("Statement", `#${m.statementId}`)];
+  if (m.state === "Auction" || m.state === "Decide") {
+    const au = [row("Reserve (the price)", ethUsd(m.auctionMin)),
+      row("High bid", m.hasBid ? `${ethUsd(m.highBid)} · ${who(m.highBidder)}` : "none yet"),
+      ...(m.state === "Decide" ? [row("Offer being voted on", `${ethUsd(m.backing)} · ${who(m.backer)}`)] : []),
+      row(m.state === "Decide" ? "Holders' window ends" : "Ends", el("span", { "data-ends": String(m.endsAt) }, ctx.dur(m.endsAt - ctx.now())))];
+    if (m.state === "Decide") au.push(row("Accepted", `${m.tally} of 80 slots · ${m.tally >= 41n ? "majority" : `${41n - m.tally} more to sell`}`),
+      el("div", { class: "accept-meter" }, el("i", { style: `width:${(Number(m.tally) / 80) * 100}%` }), el("b", {})));
     const bids = await ctx.bidHistory(b);
     if (bids?.length) au.push(ctx.bidList(bids, m.highBidder, S.account));
-    parts.push(sec(m.state === "Auction" ? "Auction" : "Sale", ...au));
+    parts.push(sec(m.state === "Decide" ? "Holders decide" : "Auction", ...au));
+  }
+  if (m.state === "Settled" && m.proceeds) {
+    const sa = [row("Sold for", ethUsd(m.proceeds)), row("Statement", `#${m.statementId}`)];
+    const bids = await ctx.bidHistory(b);
+    if (bids?.length) sa.push(ctx.bidList(bids, m.highBidder, S.account));
+    parts.push(sec("Sale", ...sa));
   }
 
-  // You
   if (m.slots) {
     const y = [row("Your slots", `${m.slots} of 80 · ${((Number(m.slots) / 80) * 100).toFixed(1)}%`)];
     if (m.state === "Settled" && m.proceeds) y.push(row("Your share", `${ethUsd(m.share)}${m.claimed ? " · collected" : ""}`));
@@ -422,10 +467,9 @@ async function renderDrawer(ctx) {
     parts.push(sec("You", ...y));
   }
 
-  // The Credits + who
   parts.push(sec(m.state === "Settled" ? `Statement #${m.statementId}` : "The 80 Credits", ctx.mosaicButton(b, m.statementId, m.state)));
-  const who = ctx.whoDetails(b, m.depositors);
-  if (who) parts.push(sec("Depositors", who));
+  const dep = ctx.whoDetails(b, m.depositors);
+  if (dep) parts.push(sec("Depositors", dep));
 
   document.getElementById("drawer-title").replaceChildren(`Batch #${b} `, el("span", { class: "btag" }, tagText(m)));
   body.replaceChildren(
@@ -447,18 +491,20 @@ export async function renderInbox(ctx, ids) {
   const open = (b) => go("Open", () => openDrawer(ctx, b));
   for (const m of models) {
     const a = actions(ctx, m);
+    const involved = m.slots || m.iLead || m.iBacker || m.myBack;
     if (m.state === "Full" && !m.minimum && m.slots && !m.pref)
       rows.push([`Vote a price on #${m.b}`, `${m.voted}/80 slots voted${m.voted + m.slots >= 41n ? " · your vote makes the majority" : ", 41 needed"}`, open(m.b)]);
     if (m.state === "Full" && m.myStale)
       rows.push([`Re-confirm your backing on #${m.b}`, "The Credits changed since you backed; it's free", go("Re-confirm", a.reconfirm)]);
-    else if (m.state === "Full" && m.minimum && m.myBack && m.myBack < m.minimum)
-      rows.push([`Your backing on #${m.b} is below the price`, `${eth(m.myBack)} vs ${eth(m.minimum)}: top up or take it back`, open(m.b)]);
-    if (m.ready && (m.slots || m.iBestBacker) && ctx.now() >= m.opensAt)
-      rows.push([`Start #${m.b}`, `Backed at ${eth(m.bestAmt)}, at the depositors' price`, go("Start auction", a.start)]);
-    if (m.ended && (m.slots || m.iLead))
-      rows.push([`Settle #${m.b}`, `Ended at ${eth(m.highBid)}${m.iLead ? ": you won" : ""}`, go("Settle", a.settle)]);
+    if (m.ready && m.slots)
+      rows.push([`Start #${m.b}`, `Price ${eth(m.minimum)}${m.bestAmt ? ` · best offer ${eth(m.bestAmt)}` : ""}`, go("Start auction", a.start)]);
+    if (m.ended && involved)
+      rows.push([`Settle #${m.b}`, m.hasBid ? `Ended at ${eth(m.highBid)}${m.iLead ? ": you won" : ""}` : m.bestAmt ? "No bid: holders vote on the best offer" : "No bid, no offer: ends unsold", go("Settle", a.settle)]);
+    if (m.state === "Decide" && m.live && m.slots && !m.iAccepted)
+      rows.push([`Take the backer's ${eth(m.backing)} for #${m.b}?`, `No bid at ${eth(m.auctionMin)} · ${m.tally}/80 accepted, 41 sells`, go("Accept", a.accept)]);
+    if (m.windowOver && involved)
+      rows.push([`Close #${m.b}`, "Holders didn't take the offer: refund the backer", go("Close", a.expire)]);
   }
-  // Collect: sale shares + refunds (outbid bids, taken-back backings, excess fees).
   const shares = models.filter((m) => m.state === "Settled" && m.slots && m.proceeds && !m.claimed);
   const refund = await read("pendingReturns", [S.account]);
   const total = shares.reduce((t, m) => t + m.share, refund);
@@ -476,64 +522,34 @@ export async function renderInbox(ctx, ids) {
 }
 
 // ───────────────────────── treasury (owner only) ─────────────────────────
+// Unsold batches the store may buy at exactly the depositors' price.
 export async function renderTreasury(ctx) {
-  const { S, el, eth, read } = ctx;
+  const { S, el, eth, read, send, confirmStep } = ctx;
   const sec = document.getElementById("treasury-section");
   if (!sec) return;
   sec.hidden = !S.treasuryOwner;
   if (!S.treasuryOwner) return;
-  const full = (S.byState ?? []).filter(([, st]) => st === "Full").map(([b]) => b);
   const [bal, cap] = await Promise.all([read("treasuryBalance", [], S.store, TREASURY_ABI), read("maxTreasuryBid", [], S.store, TREASURY_ABI)]);
-  document.getElementById("treasury-meta").textContent = `holds ${eth(bal)} · cap ${eth(cap)} per batch · owner only`;
+  document.getElementById("treasury-meta").textContent = `holds ${eth(bal)} · cap ${eth(cap)} per purchase · owner only`;
+  const full = (S.byState ?? []).filter(([, st]) => st === "Full").map(([b]) => b);
   const rows = await Promise.all(full.map(async (b) => {
-    const [minimum, [, best], [depositors], [mine]] = await Promise.all([read("majorityMinimum", [b]), read("bestBacking", [b]),
-      read("batchInfo", [b]).then((i) => [i[2]]), read("backings", [b, S.store])]);
-    if (depositors < 2n) return null;
-    // Only what the owner can act on: priced batches still waiting for a backer, and the treasury's own backings.
-    if (!mine && (!minimum || best >= minimum)) return null;
+    const [unsold, price, median, info] = await Promise.all([read("unsold", [b]), read("majorityMinimum", [b]), read("votedMedian", [b]), read("batchInfo", [b])]);
+    if (!unsold || info[2] < 2n) return null;
+    const why = !price ? "no price now" : price !== median ? `price ${eth(price)} isn't the voters' median (${eth(median)})`
+      : price > cap ? "over the per-purchase cap" : price > bal ? "more than the treasury holds" : null;
     return el("div", { class: "trow" },
-      el("div", { class: "trow-head" }, el("b", {}, `#${b}`),
-        el("span", {}, minimum ? `price ${eth(minimum)} · ${best >= minimum ? `backed ${eth(best)}` : best ? `best ${eth(best)}, below` : "no backer"}` : "no price yet")),
-      await treasuryControl(ctx, b, minimum));
+      el("div", { class: "trow-head" }, el("b", {}, `#${b}`), el("span", {}, price ? `unsold · price ${eth(price)}` : "unsold")),
+      why ? el("p", { class: "tline" }, `Can't buy: ${why}`)
+        : el("button", { class: "treasury-btn", "data-tip": "treasuryBuy", onclick: async () => {
+          const ok = await confirmStep(`Buy batch #${b} for the store at ${eth(price, 6)}?`, [
+            "Its last round ended unsold: no bid at the depositors' price, and they didn't take the backer's offer.",
+            `Pays exactly the depositors' price from the treasury (holds ${eth(bal)}). The 80 Credits burn into a Statement for the store, ready to list for SCREDIT.`,
+            "If the votes change before this lands, it's refused.",
+          ], "Buy for the store");
+          if (ok) send(`Store buys #${b}`, "buyUnsold", [b, price], undefined, S.store, TREASURY_ABI, FINALIZE_TX_GAS);
+        } }, `Buy at ${eth(price)}`));
   }));
-  document.getElementById("treasury-list").replaceChildren(...(rows.filter(Boolean).length ? rows.filter(Boolean)
-    : [el("p", { class: "muted" }, "Nothing to back right now: no priced batch is waiting for a backer.")]));
+  const list = rows.filter(Boolean);
+  document.getElementById("treasury-list").replaceChildren(...(list.length ? list
+    : [el("p", { class: "muted" }, "Nothing to buy: no batch is resting after an unsold round.")]));
 }
-
-// Owner-only: back one batch from the store treasury. One line of numbers, one action.
-// The contract re-checks every limit.
-async function treasuryControl(ctx, b, minimum) {
-  const { S, el, read, send, eth, toWei, confirmStep, toast } = ctx;
-  const [[current, curNonce], cap, bal, info] = await Promise.all([
-    read("backings", [b, S.store]), read("maxTreasuryBid", [], S.store, TREASURY_ABI), read("treasuryBalance", [], S.store, TREASURY_ABI), read("batchInfo", [b]),
-  ]);
-  if (!minimum) return el("p", { class: "tline" }, "Waits for the depositors' price");
-  const limit = minimum < cap ? minimum : cap;
-  const room = limit > current ? limit - current : 0n;
-  const btn = (label, fn, cls = "") => el("button", { class: cls, onclick: fn }, label);
-  const box = el("div", { class: "tctl" },
-    el("p", { class: "tline" }, current ? `Treasury backing ${eth(current)} of ${eth(limit)}` : `Up to ${eth(limit)}${minimum < cap ? " (the price)" : " (the cap)"}`));
-  if (room) {
-    const i = el("input", { type: "number", step: "any", min: "0", "aria-label": "Treasury amount (ETH)", value: formatEther(room < bal ? room : bal) });
-    box.append(el("div", { class: "inline" }, i, btn("Back", async () => {
-      const v = toWei(i.value);
-      if (!v) return toast("Enter an amount in ETH", true);
-      const total = current + v;
-      if (total > limit) return toast(`The treasury can back at most ${eth(limit, 6)} here`, true);
-      const ok = await confirmStep(`Back batch #${b} from the treasury?`, [
-        `Moves ${eth(v, 6)} of treasury ETH into the pool (total ${eth(total, 6)}).`,
-        total === minimum ? "That's the depositors' price, so it can open the auction." : `Below the price of ${eth(minimum, 6)}, it can't open the auction yet.`,
-        "If nobody outbids it, the Statement comes to the store for SCREDIT. Outbid or unwound, the ETH comes back.",
-      ], "Back from treasury");
-      if (ok) send(`Treasury backs #${b}`, "backBatch", [b, v, total], undefined, S.store, TREASURY_ABI);
-    }, "treasury-btn")));
-  }
-  const acts = el("div", { class: "row" });
-  if (current && curNonce !== info[6] && current <= minimum) acts.append(btn("Re-confirm (Credits changed)", () => send(`Treasury re-confirms #${b}`, "reconfirmBatch", [b], undefined, S.store, TREASURY_ABI)));
-  if (current) acts.append(btn(`Return ${eth(current)}`, () => send(`Treasury unbacks #${b}`, "unbackBatch", [b], undefined, S.store, TREASURY_ABI), "ghost"));
-  if (acts.childElementCount) box.append(acts);
-  // The price rule is checked when the treasury backs (store audit Info-1): warn if it dropped since.
-  if (current && current > minimum) box.append(el("p", { class: "tline warn" }, `The price dropped to ${eth(minimum)}, below this backing. Return it and back again if you don't want to pay more than they ask.`));
-  return box;
-}
-

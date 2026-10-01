@@ -12,15 +12,17 @@ import {ICreditStore, AggregatorV3Interface} from "./CreditPool.sol";
 
 /// @title credit.pool: backed auctions (sell first, burn second)
 /// @notice Holders pool Credits into 80-slot batches. **Nothing burns until a sale is locked in.**
-///         Depositors vote the lowest price they'd accept; the majority minimum is the lowest price
-///         more than 40 of the 80 slots accept. Anyone can back a full batch (ETH for the whole
-///         batch), but only a backing AT OR ABOVE the majority minimum can open its 24h English
-///         auction, as the opening bid. So every auction starts at a price the majority already
-///         agreed to and always sells: a lowball backing can neither buy the batch nor lock the
-///         depositors' Credits in an auction. To sell for less, the majority lowers its vote.
-///         A sale burns the 80 Credits into a Statement, delivers it to the buyer and books the
-///         proceeds for depositors, all in one all-or-nothing step (undone and refunded on failure).
-///         See docs/SELL-FIRST-DESIGN.md (invariants I1–I10, threat model).
+///         Depositors vote the lowest price they'd accept; the majority price (the lowest price more
+///         than 40 of the 80 slots accept) is the auction's reserve. A DEPOSITOR starts the 24h auction
+///         once there's a price; no backing is needed. Anyone can back a batch (ETH for the whole
+///         batch, a standing offer): a backing at or above the price when the auction starts becomes
+///         its opening bid; during the auction, backers keep offering below the price (with
+///         anti-snipe). A bid at the price sells it. With no bid, the best backing is the offer the
+///         depositors vote on (24h, more than 40 of 80 slots), or nobody backed and it ends unsold.
+///         An unsold batch rests (doubling each consecutive unsold round): holders can leave, no
+///         restart, and the store treasury may buy it at exactly the majority price. A sale burns the
+///         80 Credits into a Statement, delivers it and books the proceeds in one all-or-nothing step.
+///         See docs/SELL-FIRST-DESIGN.md (invariants, threat model).
 contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     // ───────────────────────── constants ─────────────────────────
     uint256 public constant CREDITS_PER_STATEMENT = 80;
@@ -40,6 +42,10 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     uint256 public constant MIN_BID_INCREMENT_BPS = 500;     // 5%
     uint256 public constant MIN_BACKING = 80;                // wei: 1 wei per slot, so no share rounds to 0
     uint256 public constant MAX_BACKERS = 10;                // per batch; a new backer must beat the lowest
+    uint256 public constant DECIDE_WINDOW = 24 hours;        // holders accept the backer's offer, or not
+    uint256 public constant COOLDOWN = 24 hours;             // rest after an unsold or unwound round: free exit, no restart
+    uint256 public constant MAX_REST_DOUBLINGS = 3;          // consecutive unsold rounds rest 24h, 48h, 96h, then 192h each
+    uint256 public constant STREAK_RESET_AFTER = 7 days;     // idle this long after a rest ends: the doubling starts over
     /// @dev Gas handed to the all-or-nothing finalize. A caller can't starve it into an unwind:
     ///      finalize refuses to start without this much available (real assembly ≈ 4.3M + award ≈ 2.4M).
     uint256 public constant FINALIZE_GAS = 12_000_000;
@@ -56,22 +62,27 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     ICreditStore public immutable store;
 
     // ───────────────────────── state ─────────────────────────
-    enum BatchState { Filling, Full, Auction, Sold }
+    enum BatchState { Filling, Full, Auction, Decide, Sold }
 
     struct Batch {
         BatchState state;
         uint64 nonce;          // bumps on every change to the Credit set: stale backings can't open an auction
-        uint64 round;          // bumps on every auction start (events and the site count rounds)
+        uint64 round;          // bumps on every auction start: acceptances bind to a round
+        uint64 cooldownUntil;  // no new auction before this (after an unsold or unwound round)
+        bool unsold;           // the last round ended with no sale and nothing changed since: the store may buy
+        uint8 unsoldStreak;    // consecutive unsold rounds (the rest doubles each time); not reset by reshuffling Credits
         uint256 statementId;
         uint256 proceeds;
         uint256[] creditIds;
         address[] depositors;
     }
     struct Auction {
-        address highBidder;
+        address highBidder;    // 0 until someone bids at or above the price
         uint256 highBid;
-        uint256 minimum;       // the majority minimum when the auction started (the opening bid met it)
-        uint64 endsAt;
+        uint256 minimum;       // the majority price when the auction started (the reserve)
+        uint64 endsAt;         // auction end, or the accept window's end while deciding
+        address backer;        // while deciding: the backing the depositors vote on (committed)
+        uint256 backing;
     }
     struct Backing {
         uint256 amount;
@@ -99,6 +110,8 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     mapping(address => uint256) public pendingReturns;
     mapping(uint256 => mapping(address => Backing)) public backings;
     mapping(uint256 => address[]) internal _backers;
+    mapping(uint256 => mapping(uint64 => uint256)) public acceptTally;                   // batch => round => slots
+    mapping(uint256 => mapping(uint64 => mapping(address => bool))) public accepted;
 
     // ───────────────────────── events ─────────────────────────
     event Deposited(address indexed who, uint256 indexed batchId, uint256 creditId);
@@ -109,7 +122,10 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     event Backed(uint256 indexed batchId, address indexed backer, uint256 total);
     event BackingWithdrawn(uint256 indexed batchId, address indexed backer, uint256 amount);
     event BackingEvicted(uint256 indexed batchId, address indexed backer, uint256 amount);
-    event AuctionStarted(uint256 indexed batchId, uint64 round, address backer, uint256 opening, uint256 minimum, uint256 endsAt);
+    event AuctionStarted(uint256 indexed batchId, uint64 round, address opener, uint256 opening, uint256 minimum, uint256 endsAt);
+    event DecideOpened(uint256 indexed batchId, uint64 round, address backer, uint256 backing, uint256 endsAt);
+    event Accepted(uint256 indexed batchId, uint64 round, address indexed who, uint256 slots, uint256 tally);
+    event Expired(uint256 indexed batchId, uint64 round, address backer, uint256 refunded);
     event Bid(uint256 indexed batchId, address indexed bidder, uint256 amount, uint256 endsAt);
     event Sold(uint256 indexed batchId, address indexed buyer, uint256 price, uint256 statementId);
     event Unwound(uint256 indexed batchId, address indexed buyer, uint256 refunded);
@@ -140,7 +156,13 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     error BackingTooLow();
     error BackingChanged();
     error NoMinimum();
-    error BelowMinimum();
+    error Cooldown();
+    error BidInstead();
+    error OfferChanged();
+    error NotUnsold();
+    error NotStore();
+    error PriceMoved();
+    error PivotalMinority();
     error NotYet();
     error OnlySelf();
     error NeedMoreGas();
@@ -271,6 +293,9 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
             Batch storage batch = _batches[b];
             if (batch.state == BatchState.Full) {
                 batch.state = BatchState.Filling;
+                batch.unsold = false; // a different set of Credits now
+                // unsoldStreak stays: resetting it here let a 1-slot depositor undo the doubling rest
+                // with one withdraw + refill (v3 audit M-1). It decays only with real idle time.
                 // Other depositors' votes stay: a vote is a price for the whole batch, and a start
                 // still needs a backing at or above the live majority price. Clearing every vote here
                 // let a 1-slot depositor erase a 41+ slot quorum (withdraw + depositInto) for one
@@ -327,19 +352,61 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         return 0;
     }
 
+    /// @notice The slot-weighted median of the votes actually cast (0 if nobody voted). The store only
+    ///         buys at a price that is both the majority price and this median, so one small voter
+    ///         can't set the treasury's price while others abstain (CreditPool CP-52).
+    function votedMedian(uint256 b) public view returns (uint256) {
+        address[] storage ds = _batches[b].depositors;
+        uint256 n = ds.length;
+        uint256[] memory prices = new uint256[](n);
+        uint256[] memory weights = new uint256[](n);
+        uint256 voters;
+        uint256 votedSlots;
+        for (uint256 i; i < n; ++i) {
+            uint256 p = reservePref[b][ds[i]];
+            if (p == 0) continue;
+            uint256 w = slots[b][ds[i]];
+            uint256 j = voters;
+            while (j > 0 && prices[j - 1] > p) { prices[j] = prices[j - 1]; weights[j] = weights[j - 1]; --j; }
+            prices[j] = p; weights[j] = w; ++voters; votedSlots += w;
+        }
+        uint256 cum;
+        for (uint256 k; k < voters; ++k) {
+            cum += weights[k];
+            if (cum * 2 > votedSlots) return prices[k];
+        }
+        return 0;
+    }
+
     // ───────────────────────── backing ─────────────────────────
 
     /// @notice Back a batch: ETH for the whole batch, held by the contract, in any amount (at least
     ///         80 wei). Adds to your existing backing and re-confirms it for the batch's current
-    ///         Credits. Open while the batch fills or is Full and idle. At most MAX_BACKERS per batch:
-    ///         when full, a new backer must beat the lowest, who is refunded (pull).
+    ///         Credits. Open while the batch fills, while it's Full, and during its auction (below the
+    ///         price only). At most MAX_BACKERS per batch: when full, a new backer must beat the lowest
+    ///         (stale ones go first), who is refunded (pull).
     function back(uint256 b) external payable nonReentrant {
         Batch storage batch = _batches[b];
-        if (batch.state != BatchState.Filling && batch.state != BatchState.Full) revert WrongBatchState();
+        bool live = batch.state == BatchState.Auction;
+        if (batch.state != BatchState.Filling && batch.state != BatchState.Full && !live) revert WrongBatchState();
         if (b > openBatchId) revert WrongBatchState();
         Backing storage mine = backings[b][msg.sender];
         uint256 total = mine.amount + msg.value;
         if (msg.value == 0 || total < MIN_BACKING) revert BackingTooLow();
+        if (live) {
+            // During the auction a backing is an offer BELOW the price, for the depositors to vote on
+            // if nobody bids. At or above the price it competes as a bid (+5% steps, anti-snipe).
+            Auction storage a = auctions[b];
+            if (block.timestamp >= a.endsAt) revert WrongBatchState();
+            if (total >= a.minimum) revert BidInstead();
+            // A late new best offer extends like a bid, with a bid's 5% step, and only while nobody has
+            // bid (an offer can't beat a bid): 1-wei top-ups can't keep an auction open (v3 audit M).
+            if (a.highBidder == address(0) && a.endsAt - block.timestamp < AUCTION_EXTENSION) {
+                (, uint256 prevBest) = bestBacking(b);
+                uint256 step = (prevBest * MIN_BID_INCREMENT_BPS) / 10_000;
+                if (total >= prevBest + (step == 0 ? 1 : step)) a.endsAt = uint64(block.timestamp + AUCTION_EXTENSION);
+            }
+        }
         if (mine.amount == 0) {
             address[] storage list = _backers[b];
             if (list.length == MAX_BACKERS) {
@@ -347,6 +414,9 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
                 // place against a current one (audit M-2): stale ones go first, whatever their size.
                 (uint256 lowIdx, uint256 lowAmt, bool stale) = _evictable(b);
                 if (!stale && total <= lowAmt) revert BackingTooLow();
+                // During the auction a full list only takes a newcomer who becomes the best offer, so
+                // nobody can churn the list to push an honest offer out at the last moment (v3 audit H-1).
+                if (live) { (, uint256 best) = bestBacking(b); if (total <= best) revert BackingTooLow(); }
                 address evicted = list[lowIdx];
                 pendingReturns[evicted] += lowAmt;
                 delete backings[b][evicted];
@@ -373,9 +443,12 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         emit Backed(b, msg.sender, mine.amount);
     }
 
-    /// @notice Take your backing back (to your refunds). Always possible for a backing that isn't
-    ///         the committed opening bid; the opening bid is committed once the auction starts.
+    /// @notice Take your backing back (to your refunds). Not while the batch's auction runs (until it's
+    ///         settled): offers are binding then, so offers used to fill the list and block others
+    ///         can't be pulled after the deadline to leave a dust offer behind (v3 audit H-1). Never
+    ///         for a committed backing (the opening bid, or the offer being voted on).
     function withdrawBacking(uint256 b) external nonReentrant {
+        if (_batches[b].state == BatchState.Auction) revert AuctionLive();
         uint256 amt = backings[b][msg.sender].amount;
         if (amt == 0) revert NothingToClaim();
         _dropBacker(b, msg.sender);
@@ -404,36 +477,38 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
 
     // ───────────────────────── auction ─────────────────────────
 
-    /// @notice Start the 24h auction of a Full batch. Needs a majority minimum (more than 40 of 80
-    ///         slots voted) and a current backing at or above it: the best backing becomes the
-    ///         committed opening bid. A lowball backing can't start anything, so it can't lock the
-    ///         depositors' Credits. The opening bid must be at least what the caller saw. A higher one
-    ///         only helps depositors, so it doesn't revert, and a 1-wei top-up can't block starts
-    ///         (audit L-1).
-    function startAuction(uint256 b, uint256 minOpening) external nonReentrant {
+    /// @notice A depositor starts the 24h auction of a Full batch with a majority price (the
+    ///         reserve). No backing is needed. If the best current backing already meets the price, it
+    ///         becomes the opening bid (committed), and every bid must beat it by 5%: a standing offer
+    ///         can't be undercut. Backers can't start auctions, so a backing can't lock anyone's
+    ///         Credits. No restart while the batch rests after an unsold or unwound round.
+    function startAuction(uint256 b) external nonReentrant {
         Batch storage batch = _batches[b];
         if (batch.state != BatchState.Full) revert WrongBatchState();
+        if (slots[b][msg.sender] == 0) revert NotDepositor();
         if (block.timestamp < assemblyOpensAt) revert NotYet();
+        if (block.timestamp < batch.cooldownUntil) revert Cooldown();
         _requireLinked();
-        (address backer, uint256 opening) = bestBacking(b);
-        if (opening == 0) revert NotBacked();
-        if (opening < minOpening) revert BackingChanged();
         uint256 minimum = majorityMinimum(b);
         if (minimum == 0) revert NoMinimum();          // depositors haven't agreed a price yet
-        if (opening < minimum) revert BelowMinimum();  // the best backing is under their price
-        _dropBacker(b, backer); // its ETH is now the committed opening bid
+        if (batch.unsoldStreak != 0 && block.timestamp >= uint256(batch.cooldownUntil) + STREAK_RESET_AFTER) batch.unsoldStreak = 0;
+        (address opener, uint256 opening) = bestBacking(b);
+        if (opening < minimum) (opener, opening) = (address(0), 0); // below the price: stays an open offer
+        else _dropBacker(b, opener);                    // at/above the price: committed as the first bid
         batch.state = BatchState.Auction;
         batch.round++;
+        batch.unsold = false;
         uint64 endsAt = uint64(block.timestamp + AUCTION_DURATION);
-        auctions[b] = Auction(backer, opening, minimum, endsAt);
-        emit AuctionStarted(b, batch.round, backer, opening, minimum, endsAt);
+        auctions[b] = Auction(opener, opening, minimum, endsAt, address(0), 0);
+        emit AuctionStarted(b, batch.round, opener, opening, minimum, endsAt);
     }
 
-    /// @notice The lowest bid accepted now: 5% over the high bid, at least 1 wei more.
+    /// @notice The lowest bid accepted now: the price (at least 80 wei) for the first bid, then +5%.
     function minNextBid(uint256 b) public view returns (uint256) {
-        uint256 hb = auctions[b].highBid;
-        uint256 step = (hb * MIN_BID_INCREMENT_BPS) / 10_000;
-        return hb + (step == 0 ? 1 : step);
+        Auction storage a = auctions[b];
+        if (a.highBidder == address(0)) return a.minimum < MIN_BACKING ? MIN_BACKING : a.minimum;
+        uint256 step = (a.highBid * MIN_BID_INCREMENT_BPS) / 10_000;
+        return a.highBid + (step == 0 ? 1 : step);
     }
 
     function bid(uint256 b) external payable nonReentrant {
@@ -441,20 +516,95 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         Auction storage a = auctions[b];
         if (block.timestamp >= a.endsAt) revert WrongBatchState();
         if (msg.value < minNextBid(b)) revert BidTooLow();
-        pendingReturns[a.highBidder] += a.highBid; // the previous high bid (incl. the backer's) is refunded
+        if (a.highBidder != address(0)) pendingReturns[a.highBidder] += a.highBid; // outbid: refunded
         a.highBidder = msg.sender;
         a.highBid = msg.value;
         if (a.endsAt - block.timestamp < AUCTION_EXTENSION) a.endsAt = uint64(block.timestamp + AUCTION_EXTENSION);
         emit Bid(b, msg.sender, msg.value, a.endsAt);
     }
 
-    /// @notice After the auction ends: sells to the high bidder. The auction opened at or above the
-    ///         majority minimum and bids only go up, so the price always meets it. Anyone can call.
+    /// @notice After the auction ends. Anyone can call.
+    ///         - A bid (at or above the price): sells to the high bidder.
+    ///         - No bid, a backing below the price: the best one is committed and the depositors get 24h
+    ///           to accept it.
+    ///         - No bid, no backing: the round ends unsold and the batch rests.
     function settle(uint256 b) external nonReentrant {
+        Batch storage batch = _batches[b];
         Auction storage a = auctions[b];
-        if (_batches[b].state != BatchState.Auction) revert WrongBatchState();
+        if (batch.state != BatchState.Auction) revert WrongBatchState();
         if (block.timestamp < a.endsAt) revert AuctionLive();
-        _finalizeOrUnwind(b);
+        if (a.highBidder != address(0)) return _finalizeOrUnwind(b, a.highBidder, a.highBid, false);
+        (address backer, uint256 backing) = bestBacking(b);
+        if (backing == 0) {
+            delete auctions[b];
+            _rest(batch);
+            emit Expired(b, batch.round, address(0), 0);
+            return;
+        }
+        _dropBacker(b, backer); // committed: the offer the depositors vote on
+        a.backer = backer;
+        a.backing = backing;
+        batch.state = BatchState.Decide;
+        a.endsAt = uint64(block.timestamp + DECIDE_WINDOW);
+        emit DecideOpened(b, batch.round, backer, backing, a.endsAt);
+    }
+
+    /// @dev An unsold round: back to Full, buyable by the store, and resting. Each consecutive unsold
+    ///      round with the same Credits doubles the rest (24h, 48h, 96h, then 192h), so a depositor
+    ///      who keeps starting rounds nobody wants can't keep the batch locked most of the time.
+    function _rest(Batch storage batch) internal {
+        batch.state = BatchState.Full;
+        batch.unsold = true;
+        uint256 doublings = batch.unsoldStreak < MAX_REST_DOUBLINGS ? batch.unsoldStreak : MAX_REST_DOUBLINGS;
+        if (batch.unsoldStreak < type(uint8).max) batch.unsoldStreak++;
+        batch.cooldownUntil = uint64(block.timestamp + (COOLDOWN << doublings));
+    }
+
+    /// @notice Depositors accept the backer's offer, naming the exact round, backer and amount. When
+    ///         more than 40 of the 80 slots accept, it sells to the backer in the same transaction.
+    function acceptBacking(uint256 b, uint64 round, address backer, uint256 amount) external nonReentrant {
+        Batch storage batch = _batches[b];
+        Auction storage a = auctions[b];
+        if (batch.state != BatchState.Decide || block.timestamp >= a.endsAt) revert WrongBatchState();
+        if (round != batch.round || backer != a.backer || amount != a.backing) revert OfferChanged();
+        uint256 s = slots[b][msg.sender];
+        if (s == 0) revert NotDepositor();
+        if (accepted[b][round][msg.sender]) revert WrongBatchState();
+        accepted[b][round][msg.sender] = true;
+        uint256 tally = acceptTally[b][round] + s;
+        acceptTally[b][round] = tally;
+        emit Accepted(b, round, msg.sender, s, tally);
+        if (tally >= MAJORITY) _finalizeOrUnwind(b, a.backer, a.backing, true);
+    }
+
+    /// @notice After the accept window passes without a majority: the backer is refunded, nothing
+    ///         burns, and the batch rests: holders can withdraw, the store may buy it at the majority
+    ///         price, and no new auction starts until the rest ends.
+    function expire(uint256 b) external nonReentrant {
+        Batch storage batch = _batches[b];
+        Auction memory a = auctions[b];
+        if (batch.state != BatchState.Decide || block.timestamp < a.endsAt) revert WrongBatchState();
+        delete auctions[b];
+        _rest(batch);
+        pendingReturns[a.backer] += a.backing;
+        emit Expired(b, batch.round, a.backer, a.backing);
+    }
+
+    /// @notice The store treasury buys a batch whose last round ended unsold, at exactly the
+    ///         depositors' majority price, which must also be the median of the votes cast. Only the
+    ///         store (owner-triggered, capped there) can call; never a sole holder's batch.
+    function sellToStore(uint256 b) external payable nonReentrant {
+        if (msg.sender != address(store)) revert NotStore();
+        Batch storage batch = _batches[b];
+        if (batch.state != BatchState.Full || !batch.unsold) revert NotUnsold();
+        if (batch.depositors.length < 2) revert NotDepositor();
+        uint256 price = majorityMinimum(b);
+        if (price == 0) revert NoMinimum();
+        if (msg.value != price) revert PriceMoved();
+        if (price != votedMedian(b)) revert PivotalMinority();
+        batch.unsold = false;
+        auctions[b] = Auction(address(0), 0, price, uint64(block.timestamp), address(0), 0);
+        _finalizeOrUnwind(b, msg.sender, price, false);
     }
 
     /// @notice A sole 80-slot holder can burn their batch into a Statement for themselves, no sale.
@@ -475,16 +625,26 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
     ///      effect of the attempt is undone, including moving the Credits to the vault, and the buyer
     ///      is refunded: the batch is Full again, Credits unburned. A caller can't force this by
     ///      starving gas: it refuses to start with less than FINALIZE_GAS available.
-    function _finalizeOrUnwind(uint256 b) internal {
+    /// @param fromBacking the price is paid from the committed backing (else from a bid or the store)
+    function _finalizeOrUnwind(uint256 b, address buyer, uint256 price, bool fromBacking) internal {
         Auction memory a = auctions[b];
         if (gasleft() < FINALIZE_GAS + FINALIZE_GAS / 63 + 50_000) revert NeedMoreGas();
-        try this.finalizeSale{gas: FINALIZE_GAS}(b, a.highBidder, a.highBid) {
-            // sold
+        try this.finalizeSale{gas: FINALIZE_GAS}(b, buyer, price) {
+            // sold: an unused backing goes back to its backer
+            if (!fromBacking && a.backing != 0) pendingReturns[a.backer] += a.backing;
         } catch {
-            _batches[b].state = BatchState.Full;
+            Batch storage batch = _batches[b];
+            batch.state = BatchState.Full;
+            // never shorten a rest already running (a failed store purchase during a long rest; v3 audit L)
+            if (batch.cooldownUntil < block.timestamp + COOLDOWN) batch.cooldownUntil = uint64(block.timestamp + COOLDOWN);
             delete auctions[b];
-            pendingReturns[a.highBidder] += a.highBid;
-            emit Unwound(b, a.highBidder, a.highBid);
+            if (a.highBid != 0) pendingReturns[a.highBidder] += a.highBid;
+            if (a.backing != 0) pendingReturns[a.backer] += a.backing;
+            if (a.highBid == 0 && a.backing == 0) { // a store purchase: refund it, and it stays buyable
+                pendingReturns[buyer] += price;
+                batch.unsold = true;
+            }
+            emit Unwound(b, buyer, price);
         }
     }
 
@@ -585,6 +745,9 @@ contract BackedPool is IERC721Receiver, ReentrancyGuard, Ownable2Step {
         return (x.state, x.creditIds.length, x.depositors.length, x.statementId, x.proceeds, x.round, x.nonce);
     }
     function batchCredits(uint256 b) external view returns (uint256[] memory) { return _batches[b].creditIds; }
+    function cooldownUntil(uint256 b) external view returns (uint64) { return _batches[b].cooldownUntil; }
+    /// @notice The last round ended with no sale and the Credits haven't changed since: the store may buy.
+    function unsold(uint256 b) external view returns (bool) { return _batches[b].unsold; }
     function batchDepositors(uint256 b) external view returns (address[] memory) { return _batches[b].depositors; }
     function depositorOf(uint256 id) external view returns (address) { return _credit[id].depositor; }
     function batchOf(uint256 id) external view returns (uint256) { return _credit[id].batch; }

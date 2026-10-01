@@ -42,55 +42,56 @@ contract BackedPoolForkTest is Test {
         vm.prank(holder); pool.deposit{value: fee}(ids);
     }
 
-    function test_Fork_BackedSaleBurnsRealCredits() public forked {
+    function _ends() internal view returns (uint64 e) { (,,, e,,) = pool.auctions(0); }
+
+    function test_Fork_BidAtPriceBurnsRealCredits() public forked {
         _depositAll();
         vm.prank(holder); pool.setReserve(0, 1 ether);
-        vm.prank(whale); pool.back{value: 1 ether}(0); // at the holder's minimum
-        pool.startAuction(0, 1 ether);
+        vm.prank(whale); pool.back{value: 0.5 ether}(0);
+        vm.prank(holder); pool.startAuction(0);
         vm.prank(bidder); pool.bid{value: 1.2 ether}(0);
-        (,,, uint64 e) = pool.auctions(0);
-        vm.warp(e);
+        vm.warp(_ends());
         uint256 g = gasleft();
         pool.settle(0);
         console.log("settle (burn 80 real Credits + award + deliver) gas=%s", g - gasleft());
         (BackedPool.BatchState s,,, uint256 sid, uint256 proceeds,,) = pool.batchInfo(0);
         assertEq(uint8(s), uint8(BackedPool.BatchState.Sold));
         assertEq(stmts.ownerOf(sid), bidder);
-        for (uint256 i; i < 80; ++i) {
-            vm.expectRevert();
-            CREDITS.ownerOf(ids[i]); // really burned
-        }
+        for (uint256 i; i < 80; ++i) { vm.expectRevert(); CREDITS.ownerOf(ids[i]); }
         uint256 b0 = holder.balance;
         vm.prank(holder); pool.claim(0);
         assertEq(holder.balance - b0, proceeds);
-        assertEq(BackedStore(payable(address(pool.store()))).balanceOf(holder), 160);
-        assertEq(pool.pendingReturns(whale), 1 ether);
+        vm.prank(whale); pool.withdrawBacking(0);           // the below-price offer was never used
+        assertEq(pool.pendingReturns(whale), 0.5 ether);
     }
 
-    /// A lowball backing can't start an auction on real Credits; the holder walks away with them.
-    function test_Fork_LowballCantLockRealCredits() public forked {
+    /// A lowball backer can't start anything; an expired round returns the real Credits untouched.
+    function test_Fork_LowballCantStart_ExpiredRoundReturnsCredits() public forked {
         _depositAll();
         vm.prank(holder); pool.setReserve(0, 1 ether);
         vm.prank(whale); pool.back{value: 0.001 ether}(0);
-        vm.expectRevert(BackedPool.BelowMinimum.selector);
-        pool.startAuction(0, 0.001 ether);
+        vm.prank(whale); vm.expectRevert(BackedPool.NotDepositor.selector); pool.startAuction(0);
+        vm.prank(holder); pool.startAuction(0);
+        vm.warp(_ends()); pool.settle(0);  // no bid → decide
+        vm.warp(_ends()); pool.expire(0);  // holder didn't accept
         vm.prank(holder); pool.withdraw(ids);
         for (uint256 i; i < 80; ++i) assertEq(CREDITS.ownerOf(ids[i]), holder);
-        vm.prank(whale); pool.withdrawBacking(0);
         assertEq(pool.pendingReturns(whale), 0.001 ether);
     }
 
-    function test_Fork_SettleFinalizesUnderTxCap() public forked {
+    function test_Fork_AcceptBackingFinalizesUnderTxCap() public forked {
         _depositAll();
-        vm.prank(holder); pool.setReserve(0, 0.3 ether);
+        vm.prank(holder); pool.setReserve(0, 1 ether);
         vm.prank(whale); pool.back{value: 0.3 ether}(0);
-        pool.startAuction(0, 0.3 ether);
-        (,,, uint64 e) = pool.auctions(0);
-        vm.warp(e);
+        vm.prank(holder); pool.startAuction(0);
+        vm.warp(_ends()); pool.settle(0);
+        (,,,,, uint64 r,) = pool.batchInfo(0);
+        vm.prank(holder);
         uint256 g = gasleft();
-        pool.settle{gas: 1 << 24}(0); // the per-transaction cap
-        console.log("settle that finalizes gas=%s", g - gasleft());
-        (BackedPool.BatchState s,,,,,,) = pool.batchInfo(0);
+        pool.acceptBacking{gas: 1 << 24}(0, r, whale, 0.3 ether); // the per-transaction cap
+        console.log("acceptBacking that finalizes gas=%s", g - gasleft());
+        (BackedPool.BatchState s,,, uint256 sid,,,) = pool.batchInfo(0);
         assertEq(uint8(s), uint8(BackedPool.BatchState.Sold));
+        assertEq(stmts.ownerOf(sid), whale);
     }
 }

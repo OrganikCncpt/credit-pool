@@ -29,61 +29,46 @@ buy-unsold role and a long tail of edge cases (CP-29..58).
 - Then the burn, delivery and payment happen together in one transaction.
 - With no sale, depositors keep an exit with their Credits intact, and every bidder gets their ETH back.
 
-## 2. The flow
+## 2. The flow (current, 2026-10-01)
 
 ```
-Filling ─fill─▶ Full ── vote a price (41/80) ── backing ≥ price ──start──▶ AUCTION (24h, backing = opening bid)
-   ▲             │ backers can post, raise, withdraw at any amount             │
-   │             │ (below the price they just wait; they can't start anything)  └─ ends ─▶ FINALIZE (sells)
-   └─ withdraw ──┘ (no auction live; votes stay)                                           │ burn fails
-                                                                                ◀── unwind: refund, back to Full
-FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to depositors (pull) → points
+Filling ─fill─▶ Full ── vote a price (41/80) ── a DEPOSITOR starts ──▶ AUCTION (24h, reserve = price)
+   ▲             │ backers post / raise / withdraw (any amount)  │  a backing ≥ price at start = the opening bid
+   │             │                                               │  offers below the price stay open (anti-snipe)
+   │             │                                               ├─ a bid ──────────────▶ FINALIZE (high bidder)
+   │             │                                               ├─ no bid, best offer ─▶ DECIDE (24h)
+   │             │                                               │     ├─ ≥41 slots accept ─▶ FINALIZE (that backer, at the offer)
+   │             │                                               │     └─ window ends ─▶ refund ─┐
+   │             │                                               └─ no bid, no offer ───────────┤
+   └─ withdraw ──┘ (no auction / decide running; votes stay)        UNSOLD: Full, rest 24h·2^k (k = unsold rounds in a row, ≤3),
+                                                                     holders may leave, no restart, store may buy
+STORE: buyUnsold (owner, capped, exact price pin) on an UNSOLD batch at majority price = median of cast votes → FINALIZE (store)
+FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to depositors (pull) → points; any failure unwinds (24h rest)
 ```
 
-**Revision (2026-09-30, "option 1"):** the first build let any backing open an auction, and a 24h accept
-window handled auctions that ended below the price. That let a lowball backer start auctions nobody
-wanted and lock depositors' Credits for up to 48h, repeatedly, for gas only. Now an auction opens only
-with a majority price and a backing at or above it. The accept window, `acceptBid` and `expire` are
-gone. A majority that wants to sell for less lowers its price before the auction instead of accepting
-after it.
+1. **Filling.** Deposits and withdrawals; fees $2/Credit, $1 each for 6+, split 25% platform / 75% treasury.
+2. **Price.** Depositors vote the lowest price they'd accept; the price is the lowest price more than 40 of 80
+   slots accept. It is the auction's reserve.
+3. **Start: depositors only, no backing needed.** Not during a rest. If the best current backing already meets
+   the price, it becomes the opening bid (committed) and every bid must beat it by 5%, so a standing offer can't
+   be undercut by a bid at the reserve. A backer can't start anything.
+4. **Backing (the backers' window).** Anyone posts an offer for the whole batch, any amount (≥ 80 wei), before
+   or during the auction; up to 10 backers, stale ones evicted first. During the auction an offer must stay
+   **below** the price (at the price it's a bid), and a new best offer in the last 15 minutes adds 15 minutes.
+   Offers are withdrawable until used; re-confirm (free) after the Credits change.
+5. **Settle.** A bid → sells to the high bidder. No bid → the best offer is committed and the holders get 24h to
+   accept it (round, backer, amount bound; more than 40 of 80 slots sells it). No bid and no offer → unsold.
+6. **Unsold.** Nothing burns; the batch rests 24h, doubling for each consecutive unsold round (48h, 96h, then
+   192h each), reset when its Credits change. Holders may withdraw; the store may buy it.
+7. **Store.** The treasury never backs. `buyUnsold`: owner-only, capped (raises take 3 days), exact-price pin,
+   unsold batches only, at the majority price which must equal the median of cast votes. Never a sole holder's.
+8. **FINALIZE** is all-or-nothing (§5).
 
-1. **Filling.** Deposits and withdrawals work as today. Fees are unchanged ($2/Credit, or $1 each for 6+),
-   split 25% platform / 75% treasury.
-2. **Full.** Depositors vote their minimum price, with the same majority rule as today: the price at
-   which more than 40 of 80 slots accept. They also vote the print order (Design 1 in the Statements doc).
-3. **Backing.** Anyone can back a batch by posting ETH for the whole batch, held by the contract, in **any
-   amount**.
-   - Several backers can back the same batch.
-   - A backer can withdraw their backing any time **except** while it is the opening bid of a live
-     auction. Raising or posting a backing is only possible while the batch is Filling or Full (no new
-     backings during an auction; bidding is the way in then). A backing below the majority price is
-     allowed and simply waits: it can't open an auction.
-   - At most 10 backers per batch. A newcomer displaces a stale backing (made for an older set of
-     Credits) first, otherwise must beat the lowest current one (internal audit M-2).
-   - Backing can be posted while the batch is still filling, as an early signal. It only counts once the
-     batch is Full.
-4. **Start.** Anyone can start the auction once the batch is Full, has a majority price, **and its best
-   current backing is at or above that price** (`NoMinimum` / `BelowMinimum` otherwise).
-   - The highest backing becomes the opening bid. That backer's ETH is now committed.
-   - The print order and composition freeze.
-   - The other backings stay posted, untouched, as fallbacks for a later round.
-5. **Auction (24h).** Anyone, including depositors, can bid at least 5% above the current high bid. Bids
-   in the last 15 minutes add 15 minutes. Outbid bidders, including the backer, are refunded (pull).
-6. **Auction ends:** FINALIZE runs (anyone can call it). The auction opened at or above the price and
-   bids only rise, so the sale always meets it. Depositors' Credits are locked for at most the 24h auction
-   plus anti-snipe extensions, and only at a price their majority set.
-7. **FINALIZE (atomic).** In one transaction:
-   1. burn the batch's 80 Credits through the AssemblyVault;
-   2. verify one new Statement arrived;
-   3. deliver it to the buyer;
-   4. book the proceeds for depositors (claimed pro-rata, pull);
-   5. award points (2 per burned Credit).
-
-   If any step fails, **everything unwinds** (§5).
-8. **Exit.** While no auction is live, a depositor of a Full batch can withdraw. The batch goes back to
-   Filling. Other depositors' votes stay (a depositor who leaves entirely loses theirs): clearing every vote
-   let a 1-slot depositor erase the majority's price by withdrawing and refilling (option-1 audit M).
-   Backings remain but must be re-matched to the new composition before a start.
+History: v1 let any backing open the auction (lowball lock). "Option 1" required the opening backing to meet
+the price and removed the accept window. v2 brought the accept window back with a committed fallback backing;
+its audit found a decoy-price dust takeover (H), an undercut committed backing (M) and lock griefing (M/L).
+This version fixes those: offers compete during the auction, an at-price backing is the opening bid, only
+depositors start, nothing is committed at start below the price, and the rest doubles.
 
 ## 3. Safety invariants (must hold always; each gets a handler invariant, and I1–I3 a formal proof)
 

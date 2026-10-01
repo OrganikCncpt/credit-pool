@@ -5,18 +5,18 @@ tester wallet as TESTERS:
 
     python3 simulate-backed.py <burner-addresses.txt> [tester-address]
 
-Leaves every state to look at (auctions open only with a backing at or above the depositors'
-majority price, so every auction sells):
-  #0–3   sold (#0–2 collected, #3 waiting to collect)
-  #4     won by the store treasury's backing at the price → listed in the store for SCREDIT
-  #5     a lowball backing sat below the price until the majority lowered its price to it → sold
-  #6–7   price set, but the only backing is a lowball below it: can't start, Credits stay free
-  #8     the tester's batch: the other depositor voted, the tester's vote makes the price; a backer waits
-  #9     full, no votes, no backing
+Leaves every state to look at (a depositor starts each auction; the depositors' price is the
+reserve; the best backing is the fallback offer):
+  #0–3   sold to a bidder at or above the price (#0–2 collected, #3 waiting to collect)
+  #4     unsold round → the store treasury bought it at the price → listed for SCREDIT
+  #5     a backing at the price opened the auction as its first bid; nobody beat it → sold to the backer
+  #6     no bid, the holders voted to take the best (lower) offer → sold to that backer
+  #7     started with no backing, no bid, no offer → ended unsold: resting; the store may buy it
+  #8     the tester's batch: the other depositor voted; the tester's vote makes the price; a backer waits
+  #9     no bid, holders deciding now (one of two depositors accepted)
   #10–14 live auctions with rival bids
-  #15–17 backed at the price: anyone can start the auction
-  #18    backed by the store treasury at the price · #19 live auction led by the treasury
-  #20–21 price set, waiting for a backer
+  #15–17 priced and backed: a depositor can start
+  #18–19 priced, waiting for a backer · #20–21 full, no price yet
   open batch at 50/80
 The store's ownership moves to the tester (local demo only) so the owner's treasury controls show.
 """
@@ -58,7 +58,7 @@ def ids_of(credits, who):
                          capture_output=True, text=True, check=True).stdout
     return [int(x) for x in re.findall(r"\d+", out)]
 def eth(w): return f"{w / E:.4f} ETH"
-def state(n): return ["Filling", "Full", "Auction", "Sold"][call(POOL, "batchInfo(uint256)", n)]
+def state(n): return ["Filling", "Full", "Auction", "Decide", "Sold"][call(POOL, "batchInfo(uint256)", n)]
 skip = lambda h=24: (rpc("evm_increaseTime", h * 3600 + 60), rpc("evm_mine"))
 
 rpc("anvil_autoImpersonateAccount", True)
@@ -95,9 +95,8 @@ def vote(n, lo, hi):
     for d in deps(n):
         if d != TESTER: send(d, POOL, "setReserve(uint256,uint256)", n, random.randrange(lo, hi) * E // 1000)
 def back(n, who, milli): send(who, POOL, "back(uint256)", n, value=milli * E // 1000)
-def start(n):
-    open_ = call(POOL, "bestBacking(uint256)", n, word=1)
-    send(random.choice(outsiders), POOL, "startAuction(uint256,uint256)", n, open_)
+def start(n):  # only a depositor can start
+    send(deps(n)[0] if deps(n)[0] != TESTER else deps(n)[1], POOL, "startAuction(uint256)", n)
 def bids(n, k, to=None):
     last = None
     for i in range(k):
@@ -108,57 +107,62 @@ def bids(n, k, to=None):
         last = who
 
 def price(n): return call(POOL, "majorityMinimum(uint256)", n)
+def ends(n): return call(POOL, "auctions(uint256)", n, word=3)
+def offer(n): return addr(POOL, "auctions(uint256)", n, word=4), call(POOL, "auctions(uint256)", n, word=5)
+def rnd(n): return call(POOL, "batchInfo(uint256)", n, word=5)
+def accept(n, d):
+    who, amt = offer(n)
+    send(d, POOL, "acceptBacking(uint256,uint64,address,uint256)", n, rnd(n), who, amt)
 
-print("round 1: #0–3 sold · #4 the treasury wins at the price · #5 sold after the majority lowered its price")
-for n in range(6):
+print("round 1: #0–3 bid at the price · #4,#7 unsold · #5 backer meets the price · #6 holders take the backer · #9 deciding")
+for n in list(range(8)) + [9]:
     vote(n, 10, 20)                                          # 0.010–0.019 ETH
-    if n == 4:  # the treasury backs at exactly the depositors' price; nobody outbids it
-        send(OWNER, STORE, "backBatch(uint256,uint256,uint256)", n, price(n), price(n))
-        start(n); continue
-    if n == 5:  # a lowball first: it can't start anything…
-        back(n, outsiders[0], 5)                             # 0.005 ETH, below the price
-        for d in deps(n): send(d, POOL, "setReserve(uint256,uint256)", n, 5 * E // 1000)  # …until the majority agrees to it
-        start(n); continue
-    send(random.choice(outsiders), POOL, "back(uint256)", n, value=price(n))  # a backer at the price
-    if n % 2: back(n, random.choice(outsiders), 3)          # plus a lower one that never counts
+    if n in (4, 6, 9): back(n, random.choice(outsiders), random.randrange(3, 6))   # an offer below the price
+    elif n == 7: pass                                                               # no backing at all
+    elif n == 5: send(random.choice(outsiders), POOL, "back(uint256)", n, value=price(n))
+    else: back(n, random.choice(outsiders), random.randrange(3, 6))
     start(n)
-    bids(n, random.randrange(1, 4))
+    if n < 4: bids(n, random.randrange(1, 4), to=price(n))   # first bid at the price
 skip()
-for n in range(6): send(random.choice(outsiders), POOL, "settle(uint256)", n)
-print("  " + ", ".join(f"#{n} {state(n)}" for n in range(6)))
+for n in list(range(8)) + [9]: send(random.choice(outsiders), POOL, "settle(uint256)", n)
+accept(6, deps(6)[0]); accept(6, deps(6)[1])                  # the majority takes the backer's offer
+accept(9, [d for d in deps(9) if d != TESTER][0])             # 40 of 80: one more would sell it
 for n in range(3):
     for d in deps(n): send(d, POOL, "claim(uint256)", n, gas=300_000)
+skip()
+send(random.choice(outsiders), POOL, "expire(uint256)", 4, gas=300_000)       # #7 already ended unsold at settle
+send(OWNER, STORE, "buyUnsold(uint256,uint256)", 4, price(4))  # the treasury buys #4 at the price
+print("  " + ", ".join(f"#{n} {state(n)}" for n in range(8)))
 
-print("#6–7: price set, only a lowball backing (can't start) · #8: the tester's vote makes the price")
-for n in (6, 7):
-    vote(n, 20, 30)
-    back(n, random.choice(outsiders), 2)                     # 0.002 ETH lowball
+# #9 must still be deciding when the demo opens: a fresh round, after all other time skips
+if state(9) == "Decide":
+    send(random.choice(outsiders), POOL, "expire(uint256)", 9, gas=300_000)
+    rpc("evm_increaseTime", 24 * 3600 + 60); rpc("evm_mine")
+back(9, random.choice(outsiders), 4)
+start(9)
+rpc("evm_increaseTime", 24 * 3600 + 60); rpc("evm_mine")
+send(random.choice(outsiders), POOL, "settle(uint256)", 9)
+accept(9, deps(9)[0])
+
+print("#8: the other depositor votes; a backer waits for the tester's vote")
 other = [x for x in deps(8) if x != TESTER][0]
-send(other, POOL, "setReserve(uint256,uint256)", 8, 12 * E // 1000)  # 40 slots at 0.012: one vote short
-back(8, random.choice(outsiders), 12)                        # a backer waiting at 0.012
+send(other, POOL, "setReserve(uint256,uint256)", 8, 12 * E // 1000)
+back(8, random.choice(outsiders), 9)
 
-print("round 2: #10–14 live auctions with rival bids")
+print("round 2: #10–14 live auctions")
 for n in range(10, 15):
-    vote(n, 10, 30)
-    send(random.choice(outsiders), POOL, "back(uint256)", n, value=price(n))
-    start(n); bids(n, random.randrange(1, 5))
-rpc("evm_increaseTime", 3 * 3600); rpc("evm_mine")
-print("#15–17 backed at the price · #18 treasury-backed · #19 treasury leads · #20–21 price set, no backer")
-for n in range(15, 22):
-    vote(n, 10, 30)
-for n in range(15, 18):
-    send(random.choice(outsiders), POOL, "back(uint256)", n, value=price(n) + random.randrange(0, 3) * E // 1000)
-    if n == 16: back(n, random.choice(outsiders), 3)
-send(OWNER, STORE, "backBatch(uint256,uint256,uint256)", 18, price(18), price(18))
-send(OWNER, STORE, "backBatch(uint256,uint256,uint256)", 19, price(19), price(19))
-start(19)
+    vote(n, 10, 30); back(n, random.choice(outsiders), random.randrange(3, 9)); start(n)
+    bids(n, random.randrange(1, 4), to=price(n))
+print("#15–17 priced and backed · #18–19 priced, no backer · #20–21 no price")
+for n in range(15, 20): vote(n, 10, 30)
+for n in range(15, 18): back(n, random.choice(outsiders), random.randrange(4, 12))
 send(B[0], POOL, "sweepFees()", gas=500_000)
 sid4 = call(POOL, "batchInfo(uint256)", 4, word=3)
 send(OWNER, STORE, "list(uint256,uint256)", sid4, 20, gas=300_000)
 bf = call(STORE, "bidFee()")
 for who, pts in [(deps(0)[0], 20), (deps(1)[1], 40), (deps(0)[0], 60)]:  # points earned at burn
     send(who, STORE, "bid(uint256,uint256)", sid4, pts, value=bf, gas=300_000)
-print(f"#4 won by the treasury → Statement #{sid4} listed in the store, 3 SCREDIT bids")
+print(f"#4 bought by the treasury → Statement #{sid4} listed in the store, 3 SCREDIT bids")
 if TESTER:  # local demo only: hand the store to the tester so its owner controls show
     send(OWNER, STORE, "transferOwnership(address)", TESTER, gas=200_000)
     send(TESTER, STORE, "acceptOwnership()", gas=200_000)
