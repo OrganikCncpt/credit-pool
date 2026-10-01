@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>credit.pool</title>
+<link rel="stylesheet" href="flow.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2300a3e0'/%3E%3Crect x='9' width='7' height='7' fill='%23e0007a'/%3E%3Crect y='9' width='7' height='7' fill='%23f5d000'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%23111'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="flow.html" aria-label="credit.pool">
+    <span class="dots"><i class="c"></i><i class="m"></i><i class="y"></i><i class="k"></i></span>
+    <span>credit<b>.</b>pool</span>
+  </a>
+  <div class="wallet">
+    <span class="pill" id="points" title="Store Credit: 2 per Credit burned into a Statement. Can't be transferred.">0 SCREDIT</span>
+    <span class="pill ghost" id="balance">1.0000 ETH</span>
+    <span class="pill acct">0xaD5a…4587</span>
+  </div>
+</header>
+
+<div class="demo-bar" role="region" aria-label="Prototype controls">
+  <span class="demo-label">Prototype · mock data</span>
+  <div class="demo-actions" id="demo-actions"></div>
+  <button class="link" id="restart">Restart</button>
+</div>
+
+<nav class="rail" aria-label="Progress">
+  <ol id="rail"></ol>
+</nav>
+
+<main class="stage">
+  <section class="sheet-col">
+    <div class="sheet-head">
+      <div>
+        <div class="eyebrow" id="batch-eyebrow">Batch #46</div>
+        <h1 id="batch-title">Pick Credits to pool</h1>
+      </div>
+      <span class="state" id="batch-state">Filling</span>
+    </div>
+    <div class="sheet-wrap">
+      <canvas id="sheet" width="560" height="700" aria-label="The Statement taking shape"></canvas>
+      <div class="stamp" id="stamp" hidden></div>
+    </div>
+    <div class="sheet-meta">
+      <div class="meter"><i id="fill-bar"></i></div>
+      <div class="meta-row">
+        <span id="fill-text">0 / 80 Credits</span>
+        <span class="muted" id="order-text">Print order: grouped by colour</span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel-col">
+    <div class="panel" id="panel" aria-live="polite"></div>
+    <div class="feed">
+      <div class="feed-title">Activity</div>
+      <ol id="feed"></ol>
+    </div>
+  </aside>
+</main>
+
+<footer class="foot">
+  Nothing burns until a sale is locked in · Every auction is backed · Your Credits stay yours until then
+  · <a href="index.html">live demo</a> · <a href="preview.html">design notes</a>
+</footer>
+<script type="module" src="flow.js"></script>
+</body>
+</html>

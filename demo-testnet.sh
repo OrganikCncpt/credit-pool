@@ -2,6 +2,7 @@
 # Full-scale testnet rehearsal on a local copy of Sepolia (chain id 31337, so the site's demo
 # modes work): runs the real script/DeployTestnet.s.sol and points app/config.js at the pool.
 #   TESTERS=0x..,0x.. COUNTS=80,40 FEE_SCALE=100 ./demo-testnet.sh
+# BACKED=1 (default) deploys BackedPool (backed auctions); BACKED=0 the burn-first CreditPool.
 # Then: python3 simulate-burners.py  and  python3 serve.py  →  http://localhost:5173/?as=<tester>
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -17,6 +18,7 @@ for _ in $(seq 1 30); do cast block-number --rpc-url $R >/dev/null 2>&1 && break
 cast rpc anvil_setBalance "$DEPLOYER" 0x3635C9ADC5DEA00000 --rpc-url $R >/dev/null   # 1000 ETH
 BN=$(( $(cast block-number --rpc-url $R) + 1 ))
 
+export BACKED=${BACKED:-1}
 OUT=$(forge script script/DeployTestnet.s.sol --tc DeployTestnet --rpc-url $R --broadcast --slow --private-key "$KEY" 2>&1) \
   || { echo "$OUT" | tail -20; exit 1; }
 echo "$OUT" | sed -n '/== Logs ==/,/^$/p'

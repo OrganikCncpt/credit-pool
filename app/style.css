@@ -147,3 +147,21 @@ body.sending .batch button, body.sending #deposit, body.sending #collect-all, bo
 .mosaic-grid img.ld { opacity: .35; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .mosaic-grid .ld { animation: none; } }
+/* backed auctions */
+.tag.Decide { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.backing { border: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+  background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--fg) 3%, transparent) 6px 7px); }
+.backing.is-backed { border-color: var(--c); background: color-mix(in srgb, var(--c) 6%, var(--card)); }
+.backing-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.backing-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.backing.is-backed .backing-label { color: var(--c); }
+.backing-head b { font-size: 15px; }
+.backing p { margin: 0; }
+.backing .row input { flex: 1; min-width: 0; }
+.backers { list-style: none; margin: 0; padding: 0; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+.backers li { display: flex; justify-content: space-between; gap: 8px; }
+.backers li:first-child { font-weight: 700; }
+.backers li.stale { color: var(--muted); }
+.accept-meter { position: relative; height: 8px; background: var(--line); }
+.accept-meter i { position: absolute; inset: 0 auto 0 0; background: var(--warn); transition: width .3s; }
+.accept-meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); }

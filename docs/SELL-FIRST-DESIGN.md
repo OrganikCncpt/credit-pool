@@ -48,8 +48,12 @@ FINALIZE = burn the 80 (vault) → Statement to the buyer → proceeds to deposi
 3. **Backing.** Anyone can back a batch by posting ETH for the whole batch, held by the contract, in **any
    amount**.
    - Several backers can back the same batch.
-   - A backer can raise or withdraw their backing any time **except** while it is the opening bid of a live
-     auction, or the high bid in an accept window.
+   - A backer can withdraw their backing any time **except** while it is the opening bid of a live
+     auction, or the high bid in an accept window. Raising or posting a backing is only possible while the
+     batch is Filling or Full (as built: no new backings during an auction or accept window; bidding
+     is the way in then).
+   - At most 10 backers per batch. A newcomer displaces a stale backing (made for an older set of
+     Credits) first, otherwise must beat the lowest current one (internal audit M-2).
    - Backing can be posted while the batch is still filling, as an early signal. It only counts once the
      batch is Full.
 4. **Start.** Anyone can start the auction once the batch is Full **and backed**.

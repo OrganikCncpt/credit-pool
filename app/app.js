@@ -2,6 +2,7 @@ import {
   createPublicClient, createWalletClient, custom, http, parseAbi, formatEther, parseEther, defineChain,
 } from "./vendor/viem.js"; // viem 2.56.8, bundled locally: no third-party code at runtime
 import { DEPLOYMENTS, DEFAULT_CHAIN } from "./config.js";
+import { BACKED_ABI, BACKED_STATES, BACKED_FILTERS, BACKED_TIPS, backedCard, applyBackedCopy } from "./backing.js";
 
 // ───────────────────────── ABIs ─────────────────────────
 const POOL_ABI = parseAbi([
@@ -166,6 +167,7 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") hideTip(); });
 const S = {
   chainId: DEFAULT_CHAIN, dep: null, chain: null, pub: null, wallet: null, account: null,
   pool: null, credits: null, selected: new Set(), cursor: null, clockSkew: 0, approved: false, openBatch: 0n, openFilled: 0n,
+  abi: POOL_ABI, states: STATES, backed: false,
   openWho: new Set(), lastBlock: null, refreshing: false, cards: new Map(), mineSig: null, tiles: new Map(), owners: new Map(), sidBatch: new Map(),
 };
 const $ = (id) => document.getElementById(id);
@@ -224,13 +226,13 @@ const dur = (s) => {
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m ${x}s`;
 };
-const readFresh = (functionName, args = [], address = S.pool, abi = POOL_ABI) =>
+const readFresh = (functionName, args = [], address = S.pool, abi = S.abi) =>
   S.pub.readContract({ address, abi, functionName, args });
 // Rendering reads go through a cache that is cleared at the start of every refresh, so the
 // batch cards, "Your batches" and the gallery never fetch the same value twice. Action
 // handlers use readFresh so they never act on a value from a previous render.
 const readCache = new Map();
-const read = (functionName, args = [], address = S.pool, abi = POOL_ABI) => {
+const read = (functionName, args = [], address = S.pool, abi = S.abi) => {
   const key = `${address}:${functionName}:${args.map(String).join(",")}`;
   if (!readCache.has(key)) {
     const p = readFresh(functionName, args, address, abi);
@@ -292,6 +294,13 @@ async function init() {
   for (const f of document.querySelectorAll(".fee-usd")) f.textContent = feeUsd(Number(f.dataset.mult ?? 1));
   if (!S.dep.pool) return switchNotice(`credit.pool isn't deployed on ${S.dep.name} yet. It goes live once the Statements contract is published.`);
   S.pool = S.dep.pool;
+  // Backed auctions are a pluggable feature: a BackedPool answers bestBacking(), a CreditPool doesn't.
+  S.backed = await readFresh("bestBacking", [0n], S.pool, BACKED_ABI).then(() => true, () => false);
+  if (S.backed) {
+    S.abi = BACKED_ABI; S.states = BACKED_STATES; S.filters = BACKED_FILTERS;
+    Object.assign(TIPS, BACKED_TIPS);
+    applyBackedCopy(el);
+  }
   if (S.chainId !== 31337 && !S.dep.deployBlock) console.warn("config.js: set deployBlock, or 'Your batches' may fail on public RPCs");
 
   if (actAs && S.chainId === 31337) {
@@ -426,6 +435,13 @@ const ERROR_TEXT = {
   AuctionOver: "That store auction has ended.",
   NotListed: "That Statement isn't up for auction in the store.",
   NonTransferable: "SCREDIT can't be transferred.",
+  NotBacked: "This batch needs a backer before its auction can start.",
+  BackingTooLow: "That backing is too low: at least 80 wei, and above the lowest of the 10 backers when the list is full.",
+  BackingChanged: "The backing or the minimum changed since you looked. Review the new numbers and try again.",
+  BidChanged: "The bid changed since you looked, so your acceptance wasn't counted. Review it and try again.",
+  NotYet: "Auctions haven't opened yet.",
+  NeedMoreGas: "This sale needs more gas to run safely. Try again; your wallet should allow up to 14M gas.",
+  TooMany: "Those Credits don't fit in that batch.",
 };
 function friendlyError(e) {
   if (e?.name === "UserRejectedRequestError" || e?.code === 4001 || /rejected|denied/i.test(e?.shortMessage ?? "")) {
@@ -439,7 +455,7 @@ function friendlyError(e) {
 }
 
 // ───────────────────────── tx helper ─────────────────────────
-async function send(label, functionName, args = [], value, address = S.pool, abi = POOL_ABI) {
+async function send(label, functionName, args = [], value, address = S.pool, abi = S.abi, gas) {
   if (!S.wallet) return toast(S.viewOnly ? "View-only: connect this wallet to act" : "Connect a wallet first", true);
   // One transaction at a time: a double-click must not send twice.
   if (S.sending) return toast("Wait for the current transaction to finish", true), false;
@@ -447,7 +463,7 @@ async function send(label, functionName, args = [], value, address = S.pool, abi
   document.body.classList.add("sending");
   try {
     toast(`${label}: confirm in wallet…`, false, 0);
-    const { request } = await S.pub.simulateContract({ address, abi, functionName, args, value, account: S.account });
+    const { request } = await S.pub.simulateContract({ address, abi, functionName, args, value, account: S.account, gas });
     const hash = await S.wallet.writeContract(request);
     toast(`${label}: pending…`, false, 0);
     const r = await S.pub.waitForTransactionReceipt({ hash });
@@ -519,8 +535,8 @@ async function renderStats() {
     stat(String(open), "batches filled so far"),
     el("div", { class: "stat" }, el("b", { id: "stat-statements" }, "…"), el("span", {}, "Statements made")),
     stat(fee == null ? "unavailable" : ethFee(fee * 2n), fallback ? "fee per Credit (fixed fallback: price feed offline)" : `fee per Credit (${feeUsd(2)}; ${feeUsd(1)} each for ${BULK_MIN}+)`),
-    ...(treasury == null ? [] : [stat(eth(treasury, 4), "store treasury (buys unsold Statements)")]),
-    stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, "Statement assembly"),
+    ...(treasury == null ? [] : [stat(eth(treasury, 4), S.backed ? "store treasury (75% of fees)" : "store treasury (buys unsold Statements)")]),
+    stat(opensAt <= now() ? "Open" : `in ${dur(opensAt - now())}`, S.backed ? "auctions" : "Statement assembly"),
   );
   $("fees").textContent = eth(fees);
   S.fee = fee;
@@ -644,7 +660,8 @@ function updateDepositHint() {
   $("deposit-wrap").dataset.tip = S.viewOnly ? "depositViewOnly" : !S.approved ? "depositNeedsApproval" : !n ? "depositNeedsPick" : "deposit";
   if (S.viewOnly) return ($("deposit-hint").textContent = "View-only: you can look, not deposit. Connect this wallet to act.");
   if (!S.approved) return ($("deposit-hint").textContent = "Approve the pool once, then pick Credits to deposit.");
-  if (!n) return ($("deposit-hint").textContent = "Pick Credits to deposit (rarest shown first). Every Credit counts as one slot, whatever its rarity. You can withdraw until the batch fills.");
+  if (!n) return ($("deposit-hint").textContent = "Pick Credits to deposit (rarest shown first). Every Credit counts as one slot, whatever its rarity. " +
+    (S.backed ? "You can withdraw until an auction starts, and nothing burns unless a sale is locked in." : "You can withdraw until the batch fills."));
   const txs = chunkSizes(Number(n)).length;
   const fee = `Fee: ${feeUsd(depositUsd(n))} (${Number(n) >= BULK_MIN ? `bulk rate, ${feeUsd(1)}` : feeUsd(2)} per Credit). Earns ${2n * n} SCREDIT when the batch is burned into a Statement.`;
   const nudge = Number(n) < BULK_MIN ? ` Tip: ${BULK_MIN}+ Credits at once cost ${feeUsd(1)} each.` : "";
@@ -683,7 +700,7 @@ $("deposit").onclick = async () => {
       : `${room} fill batch #${shownBatch}; the rest start the next batch.`,
     `Fee: ${feeUsd(depositUsd(ids.length))} total (≈ ${ethFee(totalWei)})${txs > 1 ? `, across ${txs} transactions` : ""}: ${feeRule()}. Not refunded if you withdraw.`,
     `You earn ${2 * ids.length} SCREDIT when their batch is burned into a Statement (store points; they can't be transferred). Withdrawn Credits earn none.`,
-    "You can withdraw them any time until their batch reaches 80. After that they're locked in.",
+    S.backed ? "You can withdraw them any time until an auction starts. They burn only if their batch sells." : "You can withdraw them any time until their batch reaches 80. After that they're locked in.",
   ], "Deposit");
   if (!ok) return;
   // The first tx is pinned to the batch state the user just confirmed; later chunks follow our own deposits.
@@ -710,7 +727,7 @@ async function renderClaims(myBatchIds) {
     read("pendingReturns", [S.account]),
     Promise.all(myBatchIds.map(async (b) => {
       const [info, slots, claimed] = await Promise.all([read("batchInfo", [b]), read("slots", [b, S.account]), read("claimed", [b, S.account])]);
-      return STATES[info[0]] === "Settled" && slots && !claimed ? { b, amt: (info[4] * slots) / PER, slots } : null;
+      return S.states[info[0]] === "Settled" && slots && !claimed ? { b, amt: (info[4] * slots) / PER, slots } : null;
     })),
   ]);
   const items = rows.filter(Boolean);
@@ -721,7 +738,7 @@ async function renderClaims(myBatchIds) {
   const list = $("claims-list");
   list.replaceChildren();
   for (const x of items) list.append(el("dt", {}, `Batch #${x.b} sale · your ${x.slots}/80`), el("dd", {}, eth(x.amt)));
-  if (refund) list.append(el("dt", {}, "Outbid refund"), el("dd", {}, eth(refund)));
+  if (refund) list.append(el("dt", {}, S.backed ? "Refunds (outbid, backings, unsold)" : "Outbid refund"), el("dd", {}, eth(refund)));
 }
 $("collect-all").onclick = async () => {
   for (const x of S.claimItems ?? []) if (!(await send(`Claim batch #${x.b}`, "claim", [x.b]))) return;
@@ -739,6 +756,16 @@ async function renderMyBatches() {
     fromBlock: S.dep.deployBlock,
   }).catch((e) => { console.error(e); return null; });
   if (logs == null) return box.replaceChildren(el("p", { class: "muted" }, "Couldn't load your batches from this RPC. Search by batch # below."));
+  if (S.backed) {
+    // Backers and bidders follow their batches too, not only depositors.
+    const ev = (name) => S.abi.find((x) => x.type === "event" && x.name === name);
+    const more = await Promise.all([
+      S.pub.getLogs({ address: S.pool, event: ev("Backed"), args: { backer: S.account }, fromBlock: S.dep.deployBlock }),
+      S.pub.getLogs({ address: S.pool, event: ev("Bid"), args: {}, fromBlock: S.dep.deployBlock })
+        .then((ls) => ls.filter((l) => l.args.bidder.toLowerCase() === S.account.toLowerCase())),
+    ]).catch(() => [[], []]);
+    logs.push(...more.flat());
+  }
   const ids = [...new Set(logs.map((l) => l.args.batchId))].sort((a, b) => (a < b ? 1 : -1));
   renderClaims(ids);
   const cards = (await Promise.all(ids.map((b) => batchCard(b, true)))).filter(Boolean);
@@ -746,7 +773,7 @@ async function renderMyBatches() {
 }
 
 // Filter tabs. "voting" covers batches waiting on a price; "sold" covers every finished batch.
-const FILTERS = [
+const BURN_FIRST_FILTERS = [
   ["all", "All", () => true],
   ["filling", "Filling", (s) => s === "Filling"],
   ["ready", "Ready to assemble", (s) => s === "Full"],
@@ -754,6 +781,7 @@ const FILTERS = [
   ["auction", "Live auctions", (s) => s === "Auction"],
   ["sold", "Sold", (s) => s === "Settled" || s === "Redeemed"],
 ];
+S.filters = BURN_FIRST_FILTERS;
 S.filter = "all";
 
 async function renderAllPage(replace = false) {
@@ -761,12 +789,12 @@ async function renderAllPage(replace = false) {
     // One cheap read per batch to know every batch's state (for tab counts and filtering).
     const ids = [];
     for (let b = S.openBatch; b >= 0n; b--) ids.push(b);
-    const states = await Promise.all(ids.map((b) => limit(() => read("batchInfo", [b])).then((x) => STATES[x[0]])));
+    const states = await Promise.all(ids.map((b) => limit(() => read("batchInfo", [b])).then((x) => S.states[x[0]])));
     S.byState = ids.map((b, i) => [b, states[i]]);
     S.shown = 0;
     renderFilters();
   }
-  const test = FILTERS.find((f) => f[0] === S.filter)[2];
+  const test = (S.filters.find((f) => f[0] === S.filter) ?? S.filters[0])[2];
   const list = S.byState.filter(([, st]) => test(st)).map(([b]) => b);
   const page = list.slice(S.shown, S.shown + Number(PAGE));
   const cards = await Promise.all(page.map((b) => batchCard(b)));
@@ -776,7 +804,7 @@ async function renderAllPage(replace = false) {
   $("more").hidden = S.shown >= list.length;
 }
 function renderFilters() {
-  $("filters").replaceChildren(...FILTERS.map(([key, label, test]) => {
+  $("filters").replaceChildren(...S.filters.map(([key, label, test]) => {
     const n = S.byState.filter(([, st]) => test(st)).length;
     return el("button", {
       class: "filter" + (S.filter === key ? " on" : ""), role: "tab", "aria-selected": String(S.filter === key),
@@ -800,6 +828,7 @@ $("jump").onsubmit = async (e) => {
 
 // ───────────────────────── batch card ─────────────────────────
 async function batchCard(b, mineOnly = false) {
+  if (S.backed) return backedCard(backingCtx, b, mineOnly);
   const me = S.account;
   const [info, auction, escape, noReserve, assembledAt, slots, pref, claimed, reserve] = await Promise.all([
     read("batchInfo", [b]),
@@ -958,29 +987,7 @@ async function batchCard(b, mineOnly = false) {
     actions.append(btn(`Claim ${eth((proceeds * slots) / PER)}`, () => send(`Claim #${b}`, "claim", [b]), "", "claim"));
   }
 
-  // Who's in the batch: loaded on first open so long lists don't cost RPC calls up front.
-  let who = null;
-  if (depositors > 0n) {
-    who = el("details", { class: "who" }, el("summary", {}, `Who's in this batch (${depositors})`));
-    who.addEventListener("toggle", async () => {
-      who.open ? S.openWho.add(b) : S.openWho.delete(b);
-      if (!who.open || who.dataset.loaded) return;
-      who.dataset.loaded = "1";
-      const addrs = await read("batchDepositors", [b]);
-      const counts = await Promise.all(addrs.map((a) => read("slots", [b, a])));
-      const rows = addrs.map((a, i) => [a, counts[i]]).sort((x, y) => (y[1] > x[1] ? 1 : y[1] < x[1] ? -1 : 0));
-      const list = el("dl", { class: "kv" });
-      for (const [a, n] of rows) {
-        const isMe = me && a.toLowerCase() === me.toLowerCase();
-        list.append(
-          el("dt", {}, isMe ? `${short(a)} (you)` : short(a)),
-          el("dd", {}, `${n} · ${((Number(n) / 80) * 100).toFixed(1)}%`),
-        );
-      }
-      who.append(list);
-    });
-    if (S.openWho.has(b)) who.open = true; // stay open across live refreshes
-  }
+  const who = whoDetails(b, depositors);
 
   // What's being sold: the batch's 80 Credits (they still render after the burn).
   const showArt = S.art && (["Full", "Assembled", "Auction", "Settled", "Redeemed"].includes(state) || (state === "Filling" && filled > 0n));
@@ -1010,6 +1017,38 @@ async function batchCard(b, mineOnly = false) {
   S.cards.set(cacheKey, { sig, el: card });
   return card;
 }
+
+// Who's in the batch: loaded on first open so long lists don't cost RPC calls up front.
+function whoDetails(b, depositors) {
+  if (depositors === 0n) return null;
+  const me = S.account;
+  const who = el("details", { class: "who" }, el("summary", {}, `Who's in this batch (${depositors})`));
+  who.addEventListener("toggle", async () => {
+    who.open ? S.openWho.add(b) : S.openWho.delete(b);
+    if (!who.open || who.dataset.loaded) return;
+    who.dataset.loaded = "1";
+    const addrs = await read("batchDepositors", [b]);
+    const counts = await Promise.all(addrs.map((a) => read("slots", [b, a])));
+    const rows = addrs.map((a, i) => [a, counts[i]]).sort((x, y) => (y[1] > x[1] ? 1 : y[1] < x[1] ? -1 : 0));
+    const list = el("dl", { class: "kv" });
+    for (const [a, n] of rows) {
+      const isMe = me && a.toLowerCase() === me.toLowerCase();
+      list.append(
+        el("dt", {}, isMe ? `${short(a)} (you)` : short(a)),
+        el("dd", {}, `${n} · ${((Number(n) / 80) * 100).toFixed(1)}%`),
+      );
+    }
+    who.append(list);
+  });
+  if (S.openWho.has(b)) who.open = true; // stay open across live refreshes
+  return who;
+}
+
+// Everything the backed-auction module needs from the app.
+const backingCtx = {
+  S, el, read, readFresh, send, eth, ethUsd, short, dur, now, toWei, confirmStep, toast, PER,
+  mosaicButton: (...a) => mosaicButton(...a), bidHistory: (b) => bidHistory(b), bidList: (...a) => bidList(...a), whoDetails,
+};
 
 // ───────────────────────── Statement viewer ─────────────────────────
 // A few RPC calls at a time, so 80-Credit mosaics don't flood public nodes.
@@ -1045,7 +1084,7 @@ const batchIds = (b, state) => (state === "Filling" ? read("batchCredits", [b]) 
 async function bidHistory(b) {
   try {
     const logs = await S.pub.getLogs({
-      address: S.pool, event: POOL_ABI.find((x) => x.type === "event" && x.name === "Bid"),
+      address: S.pool, event: S.abi.find((x) => x.type === "event" && x.name === "Bid"),
       args: { batchId: b }, fromBlock: S.dep.deployBlock,
     });
     return logs.map((l) => ({ who: l.args.bidder, amt: l.args.amount })).reverse();
@@ -1102,7 +1141,7 @@ const GALLERY_STATES = ["Assembled", "Auction", "Settled", "Redeemed"];
 const GALLERY_LABEL = { Assembled: "Voting", Auction: "Live auction", Settled: "Sold", Redeemed: "Redeemed" };
 
 async function renderGallery() {
-  const made = (S.byState ?? []).filter(([, st]) => GALLERY_STATES.includes(st));
+  const made = (S.byState ?? []).filter(([, st]) => (S.backed ? st === "Settled" : GALLERY_STATES.includes(st))); // backed: a Statement exists only once sold
   $("stat-statements") && ($("stat-statements").textContent = String(made.length));
   $("gallery-section").hidden = made.length === 0;
   $("gallery-count").textContent = made.length ? `(${made.length})` : "";
@@ -1127,7 +1166,7 @@ async function galleryTile(b, state) {
   const art = official ? el("img", { class: "official-thumb", src: official, alt: `Statement #${sid}` }) : mosaicGrid(b, state);
   const line = state === "Assembled" ? (reserve == null ? "Voting on a minimum price" : `Minimum ${eth(reserve)}, ready to auction`)
     : state === "Auction" ? (highBid ? `High bid ${eth(highBid)}` : `No bids yet · min ${eth(auction[2])}`)
-    : state === "Settled" ? `Sold for ${eth(highBid)}`
+    : state === "Settled" ? (info[4] ? `Sold for ${eth(info[4])}` : "Taken by its sole holder")
     : "Taken by its sole holder";
   const who = !owner ? "—"
     : owner.toLowerCase() === S.pool.toLowerCase() ? "Held by the pool for its depositors"
@@ -1139,7 +1178,7 @@ async function galleryTile(b, state) {
     onclick: () => openViewer(b, sid, state),
   },
     el("span", { class: "stile-art" }, art),
-    el("span", { class: "stile-top" }, el("b", {}, `Statement #${sid}`), el("span", { class: `tag ${state}` }, GALLERY_LABEL[state])),
+    el("span", { class: "stile-top" }, el("b", {}, `Statement #${sid}`), el("span", { class: `tag ${state}` }, S.backed && !info[4] ? "Redeemed" : GALLERY_LABEL[state])),
     el("span", { class: "stile-line" }, line),
     state === "Auction" && now() < endsAt ? el("span", { class: "muted small" }, "Ends in ", el("span", { "data-ends": String(endsAt) }, dur(endsAt - now()))) : null,
     el("span", { class: "muted small" }, `${who} · batch #${b}`),
@@ -1237,6 +1276,7 @@ function mosaicButton(b, sid, state) {
   }, grid, el("span", { class: "mosaic-cap" },
     state === "Filling" ? "Credits in this batch so far · click to view"
     : state === "Full" ? "The 80 Credits in this batch · click to view"
+    : S.backed && state !== "Settled" ? "The 80 Credits up for sale · nothing burns unless it sells · click to view"
     : `Statement #${sid} · made from these 80 Credits · click to view`));
   return box;
 }
@@ -1244,9 +1284,9 @@ function mosaicButton(b, sid, state) {
 async function openViewer(b, sid, state) {
   const dlg = $("viewer");
   const body = $("viewer-body");
-  const assembled = state !== "Full" && state !== "Filling";
+  const assembled = S.backed ? state === "Settled" : state !== "Full" && state !== "Filling";
   $("viewer-title").textContent = assembled ? `Statement #${sid} · Batch #${b}`
-    : state === "Full" ? `Batch #${b} · ready to assemble` : `Batch #${b} · filling`;
+    : state === "Full" ? `Batch #${b} · ${S.backed ? "full" : "ready to assemble"}` : state === "Filling" ? `Batch #${b} · filling` : `Batch #${b} · for sale`;
   body.replaceChildren(el("p", { class: "muted" }, "Loading the 80 Credits…"));
   dlg.showModal();
 
@@ -1261,6 +1301,7 @@ async function openViewer(b, sid, state) {
       ? el("div", { class: "official" }, el("img", { src: official, alt: `Statement #${sid}` }))
       : el("p", { class: "muted small" }, assembled
         ? "The Statement's own artwork shows here once the Statements contract publishes it. Below are the 80 Credits burned to make it."
+        : S.backed && state !== "Filling" ? "These 80 Credits burn into one Statement only if the sale is locked in. Until then they stay in the pool, unburned."
         : state === "Full" ? "These 80 Credits will be burned into one Statement when someone presses Assemble."
         : `${ids.length} of 80 Credits so far. The batch locks and can be assembled once it reaches 80.`),
     summary,

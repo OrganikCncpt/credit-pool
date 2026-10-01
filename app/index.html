@@ -74,7 +74,7 @@
     <div class="section-head">
       <h2>Statements <span id="gallery-count" class="muted"></span></h2>
     </div>
-    <p class="muted small">Every Statement the pool has assembled. Each one was burned from 80 Credits; click one to see them.</p>
+    <p class="muted small" id="gallery-blurb">Every Statement the pool has assembled. Each one was burned from 80 Credits; click one to see them.</p>
     <div id="gallery" class="gallery"></div>
   </section>
 
@@ -83,7 +83,7 @@
       <h2>Store</h2>
       <span id="store-meta" class="muted small"></span>
     </div>
-    <p class="muted small">Statements the store treasury bought, auctioned for SCREDIT only (never ETH). The treasury only buys Statements whose auction ended with no bids, at the minimum the depositors' majority voted.</p>
+    <p class="muted small" id="store-blurb">Statements the store treasury bought, auctioned for SCREDIT only (never ETH). The treasury only buys Statements whose auction ended with no bids, at the minimum the depositors' majority voted.</p>
     <div id="store" class="gallery"></div>
   </section>
 
@@ -108,13 +108,13 @@
       <p>Depositing costs <span class="fee-usd" data-mult="2">$2</span> per Credit, or <span class="fee-usd">$1</span> per Credit when you deposit 6 or more at once, paid in ETH at the current price (if the price feed is ever offline, a fixed ETH amount set at launch is used instead, so deposits never stop). 25% goes to the platform and 75% to the store treasury. Auction sales have no fee: depositors get the whole price. Bidding in the store costs <span class="fee-usd" data-mult="0.25">$0.25</span> per bid. Nothing else.</p></details>
     <details><summary>What is SCREDIT?</summary>
       <p>Store Credit: you earn 2 points for every Credit you have in a batch when it's burned into a Statement (withdrawn Credits and dissolved batches earn none). Points can't be sent, sold or traded. You can only bid them on Statements in the store. If you're outbid your points come back; if you win they're spent.</p></details>
-    <details><summary>Where do store Statements come from?</summary>
+    <details data-mode="burn-first"><summary>Where do store Statements come from?</summary>
       <p>The store treasury (75% of deposit fees) steps in only when a Statement's auction ends with no bids: it opens a new auction with a bid at exactly the minimum voted by more than half the batch's slots, and anyone can still outbid it for 24 hours. It only ever places the first bid (never against another bidder), never buys without a majority-voted minimum, and each purchase is capped (raising the cap takes 3 days to apply). The platform decides which unsold Statements the treasury buys.</p></details>
-    <details><summary>Can I get my Credits back?</summary>
+    <details data-mode="burn-first"><summary>Can I get my Credits back?</summary>
       <p>Yes, any time while the batch is still filling: open it under Your batches and press Withdraw. Once a batch reaches 80 it locks. If a full batch isn't assembled within 14 days, depositors can take their Credits back. The deposit fee isn't refunded.</p></details>
-    <details><summary>How is the price decided?</summary>
+    <details data-mode="burn-first"><summary>How is the price decided?</summary>
       <p>Each depositor votes the lowest price they'd accept. The minimum is the lowest price that more than 40 of the batch's 80 slots accept, so a small group can't sell it cheap. Then anyone can bid for 24 hours; each bid must beat the last by 5%, and a bid in the last 15 minutes adds 15 minutes.</p></details>
-    <details><summary>What if nobody bids, or the price is set too high?</summary>
+    <details data-mode="burn-first"><summary>What if nobody bids, or the price is set too high?</summary>
       <p>With no bids, the batch goes back to voting and depositors can lower the price. If it's still unsold 30 days after assembly, the minimum drops to the lowest price any depositor voted, so a majority can't block a sale forever.</p></details>
     <details><summary>When and how do I get paid?</summary>
       <p>When an auction ends, anyone presses Settle. Your share (your Credits ÷ 80 of the sale; there's no sale fee) appears under Ready to collect at the top of the page. Press Collect all to send it to your wallet.</p></details>
