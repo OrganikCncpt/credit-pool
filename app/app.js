@@ -476,6 +476,13 @@ async function send(label, functionName, args = [], value, address = S.pool, abi
   try {
     toast(`${label}: confirm in wallet…`, false, 0);
     const { request } = await S.pub.simulateContract({ address, abi, functionName, args, value, account: S.account, gas });
+    // Headroom over the node's estimate: the estimate runs at the latest block's timestamp, and a
+    // time-dependent branch (e.g. a late bid's anti-snipe extension) can need more gas by the time
+    // it's mined. Only gas actually used is paid.
+    if (!gas) {
+      const est = await S.pub.estimateContractGas({ address, abi, functionName, args, value, account: S.account });
+      request.gas = (est * 12n) / 10n + 30_000n;
+    }
     const hash = await S.wallet.writeContract(request);
     toast(`${label}: pending…`, false, 0);
     const r = await S.pub.waitForTransactionReceipt({ hash });

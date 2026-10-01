@@ -247,6 +247,7 @@ function status(ctx, m) {
     case "Settled":
       if (!m.proceeds) return "Burned into a Statement for its sole holder";
       if (m.iWon && !m.slots) return `You won it for ${eth(m.proceeds)} · Statement #${m.statementId} is in your wallet`;
+      if (m.iWon) return `You won it for ${eth(m.proceeds)} · Statement #${m.statementId} is in your wallet · your ${m.slots}/80 share ${eth(m.share)}${m.claimed ? " collected" : " comes back to you"}`;
       return `Sold for ${eth(m.proceeds)}${m.slots ? ` · your share ${eth(m.share)}${m.claimed ? ", collected" : ""}` : ""}`;
     default: return "";
   }
@@ -508,7 +509,10 @@ export async function renderInbox(ctx, ids) {
   const shares = models.filter((m) => m.state === "Settled" && m.slots && m.proceeds && !m.claimed);
   const refund = await read("pendingReturns", [S.account]);
   const total = shares.reduce((t, m) => t + m.share, refund);
-  if (total) rows.unshift([`Collect ${eth(total)}`,
+  // Dust (e.g. the leftover of a deposit's fee buffer) doesn't get a row of its own: it rides along
+  // with the next real collect. "Dust" = under five dollars of pool pricing (usdWei is $1 in wei).
+  const dust = S.fee ? S.fee * 5n : 0n;
+  if (total && (shares.length || refund >= dust)) rows.unshift([`Collect ${eth(total)}`,
     [...shares.map((m) => `#${m.b} sale ${eth(m.share)}`), ...(refund ? [`refunds ${eth(refund)}`] : [])].join(" · "),
     go("Collect", async () => {
       for (const m of shares) if (!(await send(`Claim #${m.b}`, "claim", [m.b]))) return;
